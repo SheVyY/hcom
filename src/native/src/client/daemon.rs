@@ -4,6 +4,7 @@
 //! and fallback to direct Python execution.
 
 use anyhow::Result;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -175,10 +176,14 @@ pub fn run(args: &[String]) -> Result<()> {
                     response.stderr.len()
                 ),
             );
-            print!("{}", response.stdout);
+            // Use write_all instead of print!/eprint! to handle EPIPE gracefully.
+            // OpenCode (and other tools) may close pipes before the process exits.
+            let _ = std::io::stdout().write_all(response.stdout.as_bytes());
+            let _ = std::io::stdout().flush();
             // Hooks must not print to stderr (corrupts JSON output for Claude/Codex)
             if !is_hook {
-                eprint!("{}", response.stderr);
+                let _ = std::io::stderr().write_all(response.stderr.as_bytes());
+                let _ = std::io::stderr().flush();
             }
             std::process::exit(response.exit_code);
         }
@@ -214,36 +219,47 @@ pub fn run(args: &[String]) -> Result<()> {
             // Hooks must not print to stderr (corrupts JSON output)
             if !is_hook {
                 let log_path = crate::paths::log_path();
-                match &e {
+                let msg = match &e {
                     DaemonError::ConnectionFailed(msg) => {
-                        eprintln!("[hcom] Cannot connect to daemon: {}", msg);
-                        eprintln!("[hcom] Check daemon log: {}", log_path.display());
-                        eprintln!("[hcom] Try: hcom daemon restart");
-                        eprintln!("[hcom] Or set HCOM_PYTHON_FALLBACK=1 to bypass");
+                        format!(
+                            "[hcom] Cannot connect to daemon: {}\n\
+                             [hcom] Check daemon log: {}\n\
+                             [hcom] Try: hcom daemon restart\n\
+                             [hcom] Or set HCOM_PYTHON_FALLBACK=1 to bypass\n",
+                            msg, log_path.display()
+                        )
                     }
                     DaemonError::ReadTimeout(msg) => {
-                        eprintln!("[hcom] Daemon hung (timeout): {}", msg);
-                        eprintln!(
-                            "[hcom] Command may have partially executed - check results before retrying"
-                        );
-                        eprintln!(
-                            "[hcom] If recurring, check daemon log: {}",
-                            log_path.display()
-                        );
+                        format!(
+                            "[hcom] Daemon hung (timeout): {}\n\
+                             [hcom] Command may have partially executed - check results before retrying\n\
+                             [hcom] If recurring, check daemon log: {}\n",
+                            msg, log_path.display()
+                        )
                     }
                     DaemonError::Io { source } => {
-                        eprintln!("[hcom] Daemon I/O error: {}", source);
-                        eprintln!("[hcom] Check daemon log: {}", log_path.display());
+                        format!(
+                            "[hcom] Daemon I/O error: {}\n\
+                             [hcom] Check daemon log: {}\n",
+                            source, log_path.display()
+                        )
                     }
                     DaemonError::Json { source } => {
-                        eprintln!("[hcom] Daemon JSON error: {}", source);
-                        eprintln!("[hcom] Check daemon log: {}", log_path.display());
+                        format!(
+                            "[hcom] Daemon JSON error: {}\n\
+                             [hcom] Check daemon log: {}\n",
+                            source, log_path.display()
+                        )
                     }
                     _ => {
-                        eprintln!("[hcom] Daemon error: {}", e);
-                        eprintln!("[hcom] Check daemon log: {}", log_path.display());
+                        format!(
+                            "[hcom] Daemon error: {}\n\
+                             [hcom] Check daemon log: {}\n",
+                            e, log_path.display()
+                        )
                     }
-                }
+                };
+                let _ = std::io::stderr().write_all(msg.as_bytes());
             }
             std::process::exit(1);
         }
@@ -274,7 +290,7 @@ fn try_daemon(
                 request_id, version_ms
             ),
         );
-        eprintln!("[hcom] Restarting daemon (version mismatch)");
+        let _ = std::io::stderr().write_all(b"[hcom] Restarting daemon (version mismatch)\n");
 
         let stop_start = Instant::now();
         stop_daemon();
@@ -515,7 +531,7 @@ pub fn exec_python_fallback(args: &[String]) -> ! {
         .args(["-m", "hcom"])
         .args(args)
         .exec();
-    eprintln!("Failed to exec {}: {}", python, err);
+    let _ = std::io::stderr().write_all(format!("Failed to exec {}: {}\n", python, err).as_bytes());
     std::process::exit(1);
 }
 

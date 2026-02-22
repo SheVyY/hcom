@@ -611,6 +611,19 @@ impl HcomDb {
         }
     }
 
+    /// Check if instance has a session binding (session_id is set and non-empty).
+    /// Used by OpenCode delivery thread to skip PTY injection when plugin is active.
+    pub fn has_session(&self, name: &str) -> bool {
+        match self.conn.query_row(
+            "SELECT session_id FROM instances WHERE name = ?",
+            params![name],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(sid) => !sid.is_empty(),
+            _ => false,
+        }
+    }
+
     /// Check if there are pending (unread) messages for an instance.
     ///
     /// Returns true if any messages exist with id > instance.last_event_id.

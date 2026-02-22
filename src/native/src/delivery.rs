@@ -619,6 +619,15 @@ pub fn run_delivery_loop(
 
             // First-message bootstrap: inject via PTY to create session in TUI.
             // Only fires once — after this, the plugin handles all delivery.
+            // Skip if plugin already has a session (e.g. user typed first, or session resumed).
+            if !first_message_injected && db.has_session(&current_name) {
+                first_message_injected = true;
+                log_info(
+                    "native",
+                    "delivery.opencode_skip_inject",
+                    &format!("{}: session already exists, plugin handles delivery", current_name),
+                );
+            }
             if !first_message_injected && db.has_pending(&current_name) {
                 let text = build_message_preview_with_db(db, &current_name);
                 // Truncate to input box width, fall back to <hcom> tag

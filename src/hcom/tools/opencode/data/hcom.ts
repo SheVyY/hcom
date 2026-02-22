@@ -33,6 +33,7 @@ export const HcomPlugin: Plugin = async ({ client, $ }) => {
   let reconcileTimer: ReturnType<typeof setInterval> | null = null  // Periodic status sync + delivery fallback
   let notifyServer: ReturnType<typeof Bun.listen> | null = null  // TCP notify server for instant message wake
   let lastReportedStatus: string | null = null  // Skip redundant status updates
+  let pendingAckId: number | null = null        // Deferred ack: set by deliverPendingToIdle, acked by transform
 
   // SAFE-02: Lazy PATH detection on first hook callback
   function checkHcom(): boolean {
@@ -70,30 +71,45 @@ export const HcomPlugin: Plugin = async ({ client, $ }) => {
     return `<hcom>[${messages.length} new messages] | ${parts.join(" | ")}</hcom>`
   }
 
-  // Deliver pending messages to idle agent via promptAsync, then ack immediately.
+  // Deliver pending messages via promptAsync. Ack is deferred to transform
+  // (fires on the loop iteration that actually processes the user message).
   async function deliverPendingToIdle(sid: string): Promise<boolean> {
     if (!instanceName) return false
+    if (pendingAckId !== null) {
+      log("DEBUG", "plugin.delivery_skipped", instanceName, { reason: "pending_ack_in_flight", pending_ack: pendingAckId })
+      return false
+    }
     const msgResult = await $.nothrow()`hcom opencode-read --name ${instanceName}`.quiet()
-    if (msgResult.exitCode !== 0) return false
+    if (msgResult.exitCode !== 0) {
+      log("WARN", "plugin.delivery_read_failed", instanceName, { exit_code: msgResult.exitCode, stderr: msgResult.stderr.toString().slice(0, 200) })
+      return false
+    }
     let rawMessages: any[] = []
-    try { rawMessages = JSON.parse(msgResult.text()) } catch { return false }
-    if (!Array.isArray(rawMessages) || rawMessages.length === 0) return false
+    try { rawMessages = JSON.parse(msgResult.text()) } catch (e) {
+      log("WARN", "plugin.delivery_parse_failed", instanceName, { error: String(e), raw: msgResult.text().slice(0, 200) })
+      return false
+    }
+    if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
+      log("DEBUG", "plugin.delivery_no_messages", instanceName)
+      return false
+    }
 
     const maxId = Math.max(...rawMessages.map((m: any) => m.event_id || 0))
     if (maxId === 0) return false
 
     const formatted = formatMessagesForInjection(rawMessages, instanceName)
-    // Ack BEFORE promptAsync — cursor must advance before the new turn's
-    // messages.transform reads, otherwise it sees the same messages again.
-    await $.nothrow()`hcom opencode-read --name ${instanceName} --ack --up-to ${String(maxId)}`.quiet()
+    // Don't ack here — defer to transform so cursor advances only when
+    // the loop is actually processing the message. This keeps messages
+    // unread until delivery is confirmed.
+    pendingAckId = maxId
     client.session.promptAsync({
       path: { id: sid },
       body: { parts: [{ type: "text", text: formatted }] },
     } as any)
-    log("INFO", "plugin.idle_delivery", instanceName, {
-      msg: `promptAsync + acked to ${maxId}`,
+    log("INFO", "plugin.delivery_pending", instanceName, {
+      msg: `promptAsync, ack deferred to transform (maxId=${maxId})`,
       count: rawMessages.length,
-      acked_to: maxId,
+      pending_ack: maxId,
     })
     return true
   }
@@ -140,6 +156,7 @@ export const HcomPlugin: Plugin = async ({ client, $ }) => {
         socket: {
           open(socket) {
             socket.end()
+            log("DEBUG", "notify_server.wake", instanceName, { status: lastReportedStatus, pending_ack: pendingAckId })
             if (sessionId && instanceName) deliverPendingToIdle(sessionId)
           },
           data() {},
@@ -183,7 +200,7 @@ export const HcomPlugin: Plugin = async ({ client, $ }) => {
         instanceName = json.name
         sessionId = json.session_id
         bootstrapText = json.bootstrap || null
-        log("INFO", "plugin.bound", instanceName, { session_id: sessionId, notify_port: notifyPort })
+        log("INFO", "plugin.bound", instanceName, { session_id: sessionId, notify_port: notifyPort, bootstrap_len: bootstrapText?.length ?? 0 })
       } catch (e) {
         log("ERROR", "plugin.bind_error", null, { error: String(e) })
         stopNotifyServer()
@@ -251,6 +268,7 @@ export const HcomPlugin: Plugin = async ({ client, $ }) => {
             bootstrapText = null
             bindingPromise = null
             lastReportedStatus = null
+            pendingAckId = null
             break
           case "file.edited": {
             const filePath = event.properties.file
@@ -293,6 +311,8 @@ export const HcomPlugin: Plugin = async ({ client, $ }) => {
         if (!instanceName || !sessionId) return
 
         // Inject bootstrap on first user message (ephemeral — clone discarded after each turn)
+        const msgCount = output.messages?.length ?? 0
+        const userMsgCount = output.messages?.filter((m: any) => m.info.role === "user").length ?? 0
         if (bootstrapText) {
           const firstUserMsg = output.messages.find((m: any) => m.info.role === "user")
           if (firstUserMsg) {
@@ -304,40 +324,21 @@ export const HcomPlugin: Plugin = async ({ client, $ }) => {
               text: bootstrapText,
               synthetic: true,
             })
+            log("DEBUG", "plugin.transform_bootstrap", instanceName, { msg_count: msgCount, user_msgs: userMsgCount, bootstrap_len: bootstrapText.length })
+          } else {
+            log("WARN", "plugin.transform_no_user_msg", instanceName, { msg_count: msgCount })
           }
+        } else {
+          log("WARN", "plugin.transform_no_bootstrap", instanceName, { msg_count: msgCount, user_msgs: userMsgCount })
         }
 
-        // Fetch pending messages
-        const msgResult = await $.nothrow()`hcom opencode-read --name ${instanceName}`.quiet()
-        if (msgResult.exitCode !== 0) return
-        let rawMessages: any[] = []
-        try { rawMessages = JSON.parse(msgResult.text()) } catch { return }
-        if (!Array.isArray(rawMessages) || rawMessages.length === 0) return
-
-        const maxId = Math.max(...rawMessages.map((m: any) => m.event_id || 0))
-        if (maxId === 0) return
-
-        // Inject as synthetic part
-        const formatted = formatMessagesForInjection(rawMessages, instanceName)
-        const lastMsg = findLastUserMessage(output.messages)
-        if (lastMsg) {
-          lastMsg.parts.push({
-            id: crypto.randomUUID(),
-            messageID: lastMsg.info.id,
-            sessionID: lastMsg.info.sessionID,
-            type: "text",
-            text: formatted,
-            synthetic: true,
-          })
-          // Ack immediately with explicit max_id — sequential, no race.
-          // Transform is awaited by OpenCode, so next transform won't fire
-          // until this returns and the LLM completes its step.
-          await $.nothrow()`hcom opencode-read --name ${instanceName} --ack --up-to ${String(maxId)}`.quiet()
-          log("INFO", "plugin.messages_delivered", instanceName, {
-            msg: `injected ${rawMessages.length} messages, acked to ${maxId}`,
-            count: rawMessages.length,
-            acked_to: maxId,
-          })
+        // Deferred ack: deliverPendingToIdle called promptAsync but didn't ack.
+        // Transform fires on the loop iteration processing that message — ack now.
+        if (pendingAckId !== null) {
+          const ackId = pendingAckId
+          pendingAckId = null
+          await $.nothrow()`hcom opencode-read --name ${instanceName} --ack --up-to ${String(ackId)}`.quiet()
+          log("INFO", "plugin.deferred_ack", instanceName, { acked_to: ackId })
         }
       } catch (e) {
         log("ERROR", "plugin.transform_error", instanceName, { error: String(e) })

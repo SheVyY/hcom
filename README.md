@@ -1497,7 +1497,7 @@ View workflow script sources:
 
 
 ```bash
-# Prerequisites: Rust 1.85+, Python 3.11+
+# Prerequisites: Rust 1.86+, Python 3.11+
 
 git clone https://github.com/aannoo/hcom.git
 cd hcom
