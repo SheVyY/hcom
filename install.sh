@@ -10,6 +10,12 @@ OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 case "$ARCH" in amd64) ARCH="x86_64" ;; arm64) ARCH="aarch64" ;; esac
 
+# Detect Termux/Android — the standard linux-aarch64 binary uses glibc which
+# doesn't exist on Android (Bionic libc + different dynamic linker path).
+if [ -n "$TERMUX_VERSION" ] || [ -d "/data/data/com.termux" ]; then
+    OS="android"
+fi
+
 ASSET="hcom-${OS}-${ARCH}"
 
 # Get latest release tag
@@ -27,7 +33,7 @@ TMP="$INSTALL_DIR/hcom.tmp.$$"
 if ! curl -fSL "$URL" -o "$TMP"; then
     rm -f "$TMP"
     echo "Error: no binary available for $OS/$ARCH" >&2
-    echo "Available platforms: linux/x86_64, linux/aarch64, darwin/x86_64, darwin/aarch64" >&2
+    echo "Available platforms: linux/x86_64, linux/aarch64, android/aarch64, darwin/x86_64, darwin/aarch64" >&2
     exit 1
 fi
 chmod +x "$TMP"
