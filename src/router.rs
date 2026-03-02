@@ -427,6 +427,19 @@ pub fn dispatch() -> anyhow::Result<()> {
 
     let action = resolve_action(argv);
 
+    // Check for updates on CLI commands (not hooks/pty/relay — those need to be fast/silent)
+    if matches!(
+        action,
+        Action::Command { .. }
+            | Action::Launch { .. }
+            | Action::Version
+            | Action::Help
+    ) {
+        if let Some(notice) = crate::update::get_update_notice() {
+            eprintln!("{notice}");
+        }
+    }
+
     match action {
         Action::Tui => {
             crate::tui::run().map_err(|e| anyhow::anyhow!("{e:#}"))?;

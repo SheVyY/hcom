@@ -39,6 +39,7 @@ mod tool;
 pub mod tools;
 mod transcript;
 mod tui;
+mod update;
 
 use anyhow::{Context, Result, bail};
 use std::panic;
