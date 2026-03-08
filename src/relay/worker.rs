@@ -9,8 +9,8 @@
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::config::HcomConfig;
@@ -24,18 +24,16 @@ fn pid_file_path() -> PathBuf {
     crate::paths::hcom_dir().join(".tmp").join("relay.pid")
 }
 
-/// Write current PID to relay.pid atomically.
 fn write_pid_file() {
     let pid = std::process::id().to_string();
     crate::paths::atomic_write(&pid_file_path(), &pid);
 }
 
-/// Read PID from relay.pid and validate process is alive.
 fn read_pid_file() -> Option<u32> {
     let path = pid_file_path();
     let content = std::fs::read_to_string(&path).ok()?;
     let pid: u32 = content.trim().parse().ok()?;
-    if is_process_alive(pid) {
+    if crate::pidtrack::is_alive(pid) {
         Some(pid)
     } else {
         // Stale PID file — clean up
@@ -47,13 +45,6 @@ fn read_pid_file() -> Option<u32> {
 /// Remove PID file.
 fn remove_pid_file() {
     let _ = std::fs::remove_file(pid_file_path());
-}
-
-/// Check if a process is alive (kill -0).
-fn is_process_alive(pid: u32) -> bool {
-    // SAFETY: kill(pid, 0) is a no-op signal that checks process existence.
-    let ret = unsafe { libc::kill(pid as i32, 0) };
-    ret == 0
 }
 
 /// Check if a relay-worker process is currently running.
@@ -121,8 +112,22 @@ pub fn run() -> i32 {
     // Install signal handlers via signal-hook (sets AtomicBool on SIGTERM/SIGINT).
     // The watchdog thread checks this flag — no separate signal-polling thread needed.
     let shutdown = Arc::new(AtomicBool::new(false));
-    let _ = signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown));
-    let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown));
+    if let Err(e) = signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown))
+    {
+        log::log_error(
+            "relay",
+            "signal.register.sigterm",
+            &format!("Failed to register SIGTERM handler: {}", e),
+        );
+    }
+    if let Err(e) = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown))
+    {
+        log::log_error(
+            "relay",
+            "signal.register.sigint",
+            &format!("Failed to register SIGINT handler: {}", e),
+        );
+    }
 
     // Spawn auto-exit watchdog thread (also monitors shutdown flag)
     let cmd_tx_watchdog = cmd_tx;
@@ -310,11 +315,7 @@ pub fn maybe_auto_spawn() {
             );
         }
         Err(e) => {
-            log::log_warn(
-                "relay",
-                "relay_worker.spawn_err",
-                &format!("{}", e),
-            );
+            log::log_warn("relay", "relay_worker.spawn_err", &format!("{}", e));
         }
     }
 }
@@ -325,11 +326,7 @@ pub fn stop_relay_worker() -> bool {
         // SAFETY: Sending SIGTERM to a known PID.
         let ret = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
         if ret == 0 {
-            log::log_info(
-                "relay",
-                "relay_worker.stopped",
-                &format!("pid={}", pid),
-            );
+            log::log_info("relay", "relay_worker.stopped", &format!("pid={}", pid));
             return true;
         }
     }
@@ -345,17 +342,5 @@ mod tests {
         crate::config::Config::init();
         let path = pid_file_path();
         assert!(path.to_string_lossy().contains("relay.pid"));
-    }
-
-    #[test]
-    fn test_is_process_alive_self() {
-        assert!(is_process_alive(std::process::id()));
-    }
-
-    #[test]
-    fn test_is_process_alive_invalid() {
-        // PID 0 is the kernel scheduler, shouldn't be accessible
-        // PID 99999999 almost certainly doesn't exist
-        assert!(!is_process_alive(99999999));
     }
 }

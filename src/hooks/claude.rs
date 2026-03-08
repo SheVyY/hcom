@@ -1,23 +1,7 @@
 //! Claude Code hook handler, settings management, and subagent lifecycle.
 //!
-//! `tools/claude/subagent.py`, and `tools/claude/settings.py`.
-//!
-//! Claude has 9 hook types: sessionstart, userpromptsubmit, pre, post, poll,
-//! notify, subagent-start, subagent-stop, sessionend.
-//!
-//! Dispatcher Flow:
-//!   1. Parse stdin JSON, build HcomContext + HookPayload
-//!   2. Correct session_id (fork bug workaround)
-//!   3. SessionStart → handle directly (no instance resolution)
-//!   4. Task pre/post → start_task/end_task
-//!   5. Subagent context check → route to subagent handlers
-//!   6. Resolve parent instance → dispatch to parent handlers
-//!
-//! Settings:
-//!   - ~/.claude/settings.json: hook commands, HCOM env var, permissions
-//!   - setup_claude_hooks() / verify_claude_hooks_installed() / remove_claude_hooks()
-//!
-//! std::process::exit(). Exit codes are returned through the call chain.
+//! 10 hook types: sessionstart, userpromptsubmit, pre, post, poll,
+//! notify, permission-request, subagent-start, subagent-stop, sessionend.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -30,9 +14,9 @@ use std::sync::LazyLock;
 use crate::bootstrap;
 use crate::config::HcomConfig;
 use crate::db::{HcomDb, InstanceRow};
+use crate::hooks::HookPayload;
 use crate::hooks::common;
 use crate::hooks::family;
-use crate::hooks::HookPayload;
 use crate::instances;
 use crate::log;
 use crate::messages;
@@ -41,26 +25,23 @@ use crate::shared::constants::{BIND_MARKER_RE, MAX_MESSAGES_PER_DELIVERY};
 use crate::shared::context::HcomContext;
 use crate::shared::{ST_ACTIVE, ST_BLOCKED, ST_INACTIVE, ST_LISTENING};
 
-// ==================== Constants ====================
-
 const HOOK_SESSIONSTART: &str = "sessionstart";
 const HOOK_USERPROMPTSUBMIT: &str = "userpromptsubmit";
 const HOOK_PRE: &str = "pre";
 const HOOK_POST: &str = "post";
 const HOOK_NOTIFY: &str = "notify";
+const HOOK_PERMISSION_REQUEST: &str = "permission-request";
 const HOOK_SUBAGENT_START: &str = "subagent-start";
 const HOOK_SUBAGENT_STOP: &str = "subagent-stop";
 const HOOK_SESSIONEND: &str = "sessionend";
 const HOOK_POLL: &str = "poll";
-
-// ==================== Entry Point ====================
 
 /// Handle a Claude hook — entry point from router.
 ///
 /// Reads JSON from stdin, builds context, dispatches to appropriate handler.
 /// Returns exit code (0 = success/non-participant, 2 = message delivered).
 ///
-pub fn handle_claude_hook(hook_type: &str) -> i32 {
+pub fn dispatch_claude_hook(hook_type: &str) -> i32 {
     let start = Instant::now();
 
     // Read stdin JSON
@@ -108,24 +89,14 @@ pub fn handle_claude_hook(hook_type: &str) -> i32 {
     }
 
     // Build payload
-    let payload = HookPayload::from_claude(&raw);
+    let mut payload = HookPayload::from_claude(raw);
 
-    // Dispatch with panic safety (matches Gemini's catch_unwind pattern)
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        dispatch_claude_hook(&db, &ctx, hook_type, &payload)
-    }));
-
-    let (exit_code, stdout, timing) = match result {
-        Ok(r) => r,
-        Err(_) => {
-            log::log_error(
-                "hooks",
-                "claude.dispatch.panic",
-                &format!("hook={}", hook_type),
-            );
-            return 0;
-        }
-    };
+    let (exit_code, stdout, timing) = common::dispatch_with_panic_guard(
+        "claude",
+        hook_type,
+        (0, String::new(), DispatchTiming::default()),
+        || route_claude_hook(&db, &ctx, hook_type, &mut payload),
+    );
 
     // Output result
     if !stdout.is_empty() {
@@ -142,8 +113,6 @@ pub fn handle_claude_hook(hook_type: &str) -> i32 {
 
     exit_code
 }
-
-// ==================== Dispatch Timing ====================
 
 /// Per-stage timing collected during dispatch,
 #[derive(Default)]
@@ -164,40 +133,54 @@ impl DispatchTiming {
     /// Format timing fields as key=value pairs for log line.
     fn format(&self, hook_type: &str, tool_name: &str, exit_code: i32, total_ms: f64) -> String {
         let instance = self.instance.as_deref();
-        let mut parts = vec![
-            format!("hook={}", hook_type),
-        ];
+        let mut parts = vec![format!("hook={}", hook_type)];
         if !tool_name.is_empty() {
             parts.push(format!("tool={}", tool_name));
         }
         if let Some(name) = instance {
             parts.push(format!("instance={}", name));
         }
-        if let Some(v) = self.init_ms { parts.push(format!("init_ms={:.2}", v)); }
-        if let Some(v) = self.session_ms { parts.push(format!("session_ms={:.2}", v)); }
-        if let Some(v) = self.resolve_ms { parts.push(format!("resolve_ms={:.2}", v)); }
-        if let Some(v) = self.bind_ms { parts.push(format!("bind_ms={:.2}", v)); }
-        if let Some(v) = self.handler_ms { parts.push(format!("handler_ms={:.2}", v)); }
-        if let Some(v) = self.subagent_check_ms { parts.push(format!("subagent_check_ms={:.2}", v)); }
-        if let Some(v) = self.task_ms { parts.push(format!("task_ms={:.2}", v)); }
+        if let Some(v) = self.init_ms {
+            parts.push(format!("init_ms={:.2}", v));
+        }
+        if let Some(v) = self.session_ms {
+            parts.push(format!("session_ms={:.2}", v));
+        }
+        if let Some(v) = self.resolve_ms {
+            parts.push(format!("resolve_ms={:.2}", v));
+        }
+        if let Some(v) = self.bind_ms {
+            parts.push(format!("bind_ms={:.2}", v));
+        }
+        if let Some(v) = self.handler_ms {
+            parts.push(format!("handler_ms={:.2}", v));
+        }
+        if let Some(v) = self.subagent_check_ms {
+            parts.push(format!("subagent_check_ms={:.2}", v));
+        }
+        if let Some(v) = self.task_ms {
+            parts.push(format!("task_ms={:.2}", v));
+        }
         parts.push(format!("total_ms={:.2}", total_ms));
         parts.push(format!("exit_code={}", exit_code));
-        if let Some(ctx) = self.context { parts.push(format!("context={}", ctx)); }
-        if let Some(r) = self.result { parts.push(format!("result={}", r)); }
+        if let Some(ctx) = self.context {
+            parts.push(format!("context={}", ctx));
+        }
+        if let Some(r) = self.result {
+            parts.push(format!("result={}", r));
+        }
         parts.join(" ")
     }
 }
 
-// ==================== Dispatcher ====================
-
 /// Core dispatcher — routes to appropriate handler.
 ///
 /// Returns (exit_code, stdout_string, timing).
-fn dispatch_claude_hook(
+fn route_claude_hook(
     db: &HcomDb,
     ctx: &HcomContext,
     hook_type: &str,
-    payload: &HookPayload,
+    payload: &mut HookPayload,
 ) -> (i32, String, DispatchTiming) {
     let dispatch_start = Instant::now();
     let mut timing = DispatchTiming::default();
@@ -211,15 +194,11 @@ fn dispatch_claude_hook(
 
     // Correct session_id (fork bug workaround)
     let session_start = Instant::now();
-    let session_id = get_real_session_id(
-        &payload.raw,
-        ctx.claude_env_file.as_deref(),
-        ctx.is_fork,
-    );
+    let session_id = get_real_session_id(&payload.raw, ctx.claude_env_file.as_deref(), ctx.is_fork);
 
-    // Update raw with corrected session_id for downstream use
-    let mut raw = payload.raw.clone();
-    if let Some(obj) = raw.as_object_mut() {
+    // Update payload in place so downstream handlers don't need another raw clone.
+    payload.session_id = Some(session_id.clone());
+    if let Some(obj) = payload.raw.as_object_mut() {
         obj.insert("session_id".into(), Value::String(session_id.clone()));
     }
     timing.session_ms = Some(session_start.elapsed().as_secs_f64() * 1000.0);
@@ -227,7 +206,7 @@ fn dispatch_claude_hook(
     // SessionStart — no instance resolution needed
     if hook_type == HOOK_SESSIONSTART {
         let handler_start = Instant::now();
-        let result = handle_sessionstart(db, ctx, &session_id, &raw);
+        let result = handle_sessionstart(db, ctx, &session_id, &payload.raw);
         timing.handler_ms = Some(handler_start.elapsed().as_secs_f64() * 1000.0);
         return (result.0, result.1, timing);
     }
@@ -236,41 +215,46 @@ fn dispatch_claude_hook(
     let tool_name = payload.tool_name.as_str();
     if hook_type == HOOK_PRE && tool_name == "Task" {
         let task_start = Instant::now();
-        let (stdout, exit_code) = start_task(db, &session_id, &raw);
+        let (stdout, exit_code) = start_task(db, &session_id, &payload.raw);
         timing.task_ms = Some(task_start.elapsed().as_secs_f64() * 1000.0);
         return (exit_code, stdout, timing);
     }
     if hook_type == HOOK_POST && tool_name == "Task" {
         let task_start = Instant::now();
-        let stdout = end_task(db, &session_id, &raw, false).unwrap_or_default();
+        let stdout = end_task(db, &session_id, &payload.raw, false).unwrap_or_default();
         timing.task_ms = Some(task_start.elapsed().as_secs_f64() * 1000.0);
         return (0, stdout, timing);
     }
 
     // Subagent context check
     let subagent_check_start = Instant::now();
-    let is_in_subagent_ctx = in_subagent_context(db, &session_id);
+    let is_in_subagent_ctx = instances::in_subagent_context(db, &session_id);
     timing.subagent_check_ms = Some(subagent_check_start.elapsed().as_secs_f64() * 1000.0);
 
     if is_in_subagent_ctx {
         timing.context = Some("subagent");
 
         if hook_type == HOOK_USERPROMPTSUBMIT {
-            let transcript_path = payload.transcript_path.as_str();
+            let transcript_path = payload.transcript_path.as_deref().unwrap_or("");
             cleanup_dead_subagents(db, &session_id, transcript_path);
             // Fall through to parent handler for PTY message delivery
         }
 
         if hook_type == HOOK_SUBAGENT_START {
-            let agent_id = raw.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
-            let agent_type = raw
+            let agent_id = payload
+                .raw
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let agent_type = payload
+                .raw
                 .get("agent_type")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if !agent_id.is_empty() && !agent_type.is_empty() {
                 track_subagent(db, &session_id, agent_id, agent_type);
             }
-            let output = subagent_start(&raw);
+            let output = subagent_start(&payload.raw);
             if let Some(out) = output {
                 return (0, serde_json::to_string(&out).unwrap_or_default(), timing);
             }
@@ -278,7 +262,7 @@ fn dispatch_claude_hook(
         }
 
         if hook_type == HOOK_SUBAGENT_STOP {
-            let (exit_code, stdout) = subagent_stop(db, &raw, &session_id);
+            let (exit_code, stdout) = subagent_stop(db, &payload.raw, &session_id);
             return (exit_code, stdout, timing);
         }
 
@@ -294,7 +278,7 @@ fn dispatch_claude_hook(
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 if hook_type == HOOK_POST && extract_name(command).is_some() {
-                    let (exit_code, stdout) = subagent_posttooluse(db, &raw);
+                    let (exit_code, stdout) = subagent_posttooluse(db, &payload.raw);
                     return (exit_code, stdout, timing);
                 }
             }
@@ -304,22 +288,27 @@ fn dispatch_claude_hook(
 
     // Resolve parent instance
     let resolve_start = Instant::now();
-    let (instance_name, updates, _is_matched_resume) =
-        common::init_hook_context(db, ctx, &session_id, &payload.transcript_path);
+    let (instance_name, updates, _is_matched_resume) = common::init_hook_context(
+        db,
+        ctx,
+        &session_id,
+        payload.transcript_path.as_deref().unwrap_or(""),
+    );
     timing.resolve_ms = Some(resolve_start.elapsed().as_secs_f64() * 1000.0);
 
     // Vanilla binding for Bash post hook
     let bind_start = Instant::now();
     let (instance_name, updates) = if hook_type == HOOK_POST && tool_name == "Bash" {
-        let bound = bind_vanilla_from_marker(db, &raw, &session_id, instance_name.as_deref());
+        let bound =
+            bind_vanilla_from_marker(db, &payload.raw, &session_id, instance_name.as_deref());
         match bound {
             Some(name) => {
                 let mut u = updates;
                 u.entry("directory".to_string())
                     .or_insert_with(|| Value::String(ctx.cwd.to_string_lossy().to_string()));
-                if !payload.transcript_path.is_empty() {
+                if let Some(ref tp) = payload.transcript_path {
                     u.entry("transcript_path".to_string())
-                        .or_insert_with(|| Value::String(payload.transcript_path.clone()));
+                        .or_insert_with(|| Value::String(tp.clone()));
                 }
                 (Some(name), u)
             }
@@ -349,20 +338,19 @@ fn dispatch_claude_hook(
     let result = match hook_type {
         HOOK_PRE => handle_pretooluse(db, payload, instance_name),
         HOOK_POST => handle_posttooluse(db, ctx, payload, instance_name, &instance_data, &updates),
-        HOOK_POLL => handle_stop(db, ctx, instance_name, &instance_data),
+        HOOK_POLL => handle_poll(db, ctx, instance_name, &instance_data),
         HOOK_NOTIFY => handle_notify(db, payload, instance_name, &updates),
+        HOOK_PERMISSION_REQUEST => handle_permission_request(db, payload, instance_name, &updates),
         HOOK_USERPROMPTSUBMIT => {
             handle_userpromptsubmit(db, ctx, payload, instance_name, &updates, &instance_data)
         }
-        HOOK_SESSIONEND => handle_sessionend(db, instance_name, &raw, &updates),
+        HOOK_SESSIONEND => handle_sessionend(db, instance_name, &payload.raw, &updates),
         _ => (0, String::new()),
     };
     timing.handler_ms = Some(handler_start.elapsed().as_secs_f64() * 1000.0);
 
     (result.0, result.1, timing)
 }
-
-// ==================== Fork Bug Workaround (1E.12) ====================
 
 /// Get correct session_id, handling Claude Code's fork bug.
 ///
@@ -419,8 +407,6 @@ fn get_real_session_id(raw: &Value, env_file: Option<&str>, is_fork: bool) -> St
     hook_session_id.to_string()
 }
 
-// ==================== SessionStart (1E.2) ====================
-
 /// Handle SessionStart: bind session, inject bootstrap.
 fn handle_sessionstart(
     db: &HcomDb,
@@ -465,7 +451,7 @@ fn handle_sessionstart(
 
     // Vanilla instance - show hint
     if process_id.is_none() || session_id.is_empty() {
-        let hcom_cmd = super::common::build_hcom_command();
+        let hcom_cmd = crate::runtime_env::build_hcom_command();
         let output = serde_json::json!({
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
@@ -510,9 +496,7 @@ fn handle_compact_recovery(
         .get_session_binding(session_id)
         .ok()
         .flatten()
-        .or_else(|| {
-            process_id.and_then(|pid| instances::resolve_process_binding(db, Some(pid)))
-        })?;
+        .or_else(|| process_id.and_then(|pid| instances::resolve_process_binding(db, Some(pid))))?;
 
     let bootstrap = if process_id.is_some() {
         // hcom-launched: inject full bootstrap
@@ -557,8 +541,7 @@ fn bind_and_bootstrap(
     session_id: &str,
     process_id: &str,
 ) -> Result<Option<Value>, String> {
-    let mut instance_name =
-        instances::bind_session_to_process(db, session_id, Some(process_id));
+    let mut instance_name = instances::bind_session_to_process(db, session_id, Some(process_id));
 
     // Orphaned PTY: process_id exists but no binding (e.g., after /clear)
     if instance_name.is_none() {
@@ -567,10 +550,7 @@ fn bind_and_bootstrap(
         log::log_info(
             "hooks",
             "sessionstart.orphan_created",
-            &format!(
-                "instance={:?} process_id={}",
-                instance_name, process_id
-            ),
+            &format!("instance={:?} process_id={}", instance_name, process_id),
         );
     }
 
@@ -586,13 +566,16 @@ fn bind_and_bootstrap(
     // Capture launch context
     instances::capture_and_store_launch_context(db, &instance_name);
 
-    // Set status
-    instances::set_status(db, &instance_name, ST_LISTENING, "start", "", "", None, None);
+    instances::set_status(
+        db,
+        &instance_name,
+        ST_LISTENING,
+        "start",
+        Default::default(),
+    );
 
-    // Terminal title
-    common::set_terminal_title(&instance_name);
+    crate::runtime_env::set_terminal_title(&instance_name);
 
-    // Inject bootstrap
     let is_resume = instance.name_announced != 0;
     let tag = instance.tag.as_deref().unwrap_or("");
     let bootstrap_text = bootstrap::get_bootstrap(
@@ -625,13 +608,15 @@ fn bind_and_bootstrap(
     Ok(Some(result))
 }
 
-// ==================== Task Coordination ====================
-
 /// PreToolUse Task: enter subagent context.
 ///
 /// Returns (stdout, exit_code).
 fn start_task(db: &HcomDb, session_id: &str, raw: &Value) -> (String, i32) {
-    log::log_info("hooks", "start_task.enter", &format!("session_id={}", session_id));
+    log::log_info(
+        "hooks",
+        "start_task.enter",
+        &format!("session_id={}", session_id),
+    );
 
     let instance_name = match db.get_session_binding(session_id) {
         Ok(Some(name)) => name,
@@ -644,8 +629,7 @@ fn start_task(db: &HcomDb, session_id: &str, raw: &Value) -> (String, i32) {
         _ => return (String::new(), 0),
     };
 
-    let mut running_tasks =
-        instances::parse_running_tasks(instance_data.running_tasks.as_deref());
+    let mut running_tasks = instances::parse_running_tasks(instance_data.running_tasks.as_deref());
     running_tasks.active = true;
     let rt_json = serde_json::json!({
         "active": running_tasks.active,
@@ -655,18 +639,20 @@ fn start_task(db: &HcomDb, session_id: &str, raw: &Value) -> (String, i32) {
     updates.insert("running_tasks".into(), Value::String(rt_json.to_string()));
     instances::update_instance_position(db, &instance_name, &updates);
 
-    // Set status with task detail
-    let tool_input = raw.get("tool_input").cloned().unwrap_or(Value::Object(Default::default()));
+    let tool_input = raw
+        .get("tool_input")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
     let detail = family::extract_tool_detail("claude", "Task", &tool_input);
     instances::set_status(
         db,
         &instance_name,
         ST_ACTIVE,
         "tool:Task",
-        &detail,
-        "",
-        None,
-        None,
+        instances::StatusUpdate {
+            detail: &detail,
+            ..Default::default()
+        },
     );
 
     // Append hcom instructions to Task prompt
@@ -675,8 +661,9 @@ fn start_task(db: &HcomDb, session_id: &str, raw: &Value) -> (String, i32) {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if !original_prompt.is_empty() {
-        let hcom_cmd = super::common::build_hcom_command();
-        let hcom_hint = format!("\n\n---\nTo use hcom: run `{hcom_cmd} start --name <your-agent-id>` first.");
+        let hcom_cmd = crate::runtime_env::build_hcom_command();
+        let hcom_hint =
+            format!("\n\n---\nTo use hcom: run `{hcom_cmd} start --name <your-agent-id>` first.");
         let mut updated = tool_input.clone();
         if let Some(obj) = updated.as_object_mut() {
             obj.insert(
@@ -754,10 +741,7 @@ fn deliver_freeze_messages(
         .prepare("SELECT name, agent_id FROM instances WHERE parent_name = ?")
         .and_then(|mut stmt| {
             stmt.query_map(rusqlite::params![instance_name], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
             })
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
         })
@@ -887,17 +871,14 @@ fn deliver_freeze_messages(
         },
     });
 
-    (last_id, Some(serde_json::to_string(&output).unwrap_or_default()))
+    (
+        last_id,
+        Some(serde_json::to_string(&output).unwrap_or_default()),
+    )
 }
 
-// ==================== PreToolUse (1E.4) ====================
-
 /// Parent PreToolUse: status tracking with tool-specific detail.
-fn handle_pretooluse(
-    db: &HcomDb,
-    payload: &HookPayload,
-    instance_name: &str,
-) -> (i32, String) {
+fn handle_pretooluse(db: &HcomDb, payload: &HookPayload, instance_name: &str) -> (i32, String) {
     let tool_name = payload.tool_name.as_str();
     let tool_input = &payload.tool_input;
 
@@ -912,8 +893,6 @@ fn handle_pretooluse(
     common::update_tool_status(db, instance_name, "claude", tool_name, tool_input);
     (0, String::new())
 }
-
-// ==================== PostToolUse (1E.5) ====================
 
 /// Parent PostToolUse: bootstrap, messages, vanilla binding.
 fn handle_posttooluse(
@@ -934,10 +913,7 @@ fn handle_posttooluse(
             instance_name,
             ST_ACTIVE,
             &format!("approved:{}", tool_name),
-            "",
-            "",
-            None,
-            None,
+            Default::default(),
         );
     }
 
@@ -958,10 +934,7 @@ fn handle_posttooluse(
 
     if !outputs.is_empty() {
         let combined = combine_posttooluse_outputs(&outputs);
-        return (
-            0,
-            serde_json::to_string(&combined).unwrap_or_default(),
-        );
+        return (0, serde_json::to_string(&combined).unwrap_or_default());
     }
 
     (0, String::new())
@@ -997,7 +970,7 @@ fn get_posttooluse_messages(db: &HcomDb, instance_name: &str) -> Option<Value> {
     let model_context = model_context?;
 
     // Claude needs user-facing display in addition to model context
-    let get_instance_data = common::make_instance_lookup(&db);
+    let get_instance_data = common::make_instance_lookup(db);
     let hints = common::load_config_hints();
     let get_config_hints = || hints.clone();
     let user_display = messages::format_hook_messages(
@@ -1060,10 +1033,8 @@ fn combine_posttooluse_outputs(outputs: &[Value]) -> Value {
     result
 }
 
-// ==================== Stop/Poll (1E.6) ====================
-
-/// Parent Stop hook: message delivery when Claude goes idle.
-fn handle_stop(
+/// Poll hook: message delivery when Claude goes idle.
+fn handle_poll(
     db: &HcomDb,
     ctx: &HcomContext,
     instance_name: &str,
@@ -1080,7 +1051,7 @@ fn handle_stop(
 
     // PTY mode: exit immediately, PTY wrapper handles injection
     if ctx.is_pty_mode {
-        instances::set_status(db, instance_name, ST_LISTENING, "", "", "", None, None);
+        instances::set_status(db, instance_name, ST_LISTENING, "", Default::default());
         common::notify_hook_instance_with_db(db, instance_name);
         return (0, String::new());
     }
@@ -1088,7 +1059,10 @@ fn handle_stop(
     // Non-PTY: poll for messages
     let wait_timeout = instance_data.wait_timeout;
     let timeout = wait_timeout.unwrap_or_else(|| {
-        HcomConfig::load(None).ok().map(|c| c.timeout).unwrap_or(120)
+        HcomConfig::load(None)
+            .ok()
+            .map(|c| c.timeout)
+            .unwrap_or(120)
     });
 
     // Persist effective timeout
@@ -1105,10 +1079,7 @@ fn handle_stop(
             instance_name,
             ST_INACTIVE,
             "exit:timeout",
-            "",
-            "",
-            None,
-            None,
+            Default::default(),
         );
     }
 
@@ -1117,8 +1088,6 @@ fn handle_stop(
         .unwrap_or_default();
     (exit_code, stdout)
 }
-
-// ==================== UserPromptSubmit (1E.3) ====================
 
 /// Parent UserPromptSubmit: fallback bootstrap, PTY mode message delivery.
 fn handle_userpromptsubmit(
@@ -1148,11 +1117,8 @@ fn handle_userpromptsubmit(
                 }
             });
             paths::increment_flag_counter("instance_count");
-            instances::set_status(db, instance_name, ST_ACTIVE, "prompt", "", "", None, None);
-            return (
-                0,
-                serde_json::to_string(&output).unwrap_or_default(),
-            );
+            instances::set_status(db, instance_name, ST_ACTIVE, "prompt", Default::default());
+            return (0, serde_json::to_string(&output).unwrap_or_default());
         }
     }
 
@@ -1210,10 +1176,10 @@ fn handle_userpromptsubmit(
                 instance_name,
                 ST_ACTIVE,
                 &format!("deliver:{}", display),
-                "",
-                msg_ts,
-                None,
-                None,
+                instances::StatusUpdate {
+                    msg_ts,
+                    ..Default::default()
+                },
             );
 
             let output = serde_json::json!({
@@ -1223,46 +1189,105 @@ fn handle_userpromptsubmit(
                     "additionalContext": model_context,
                 },
             });
-            return (
-                0,
-                serde_json::to_string(&output).unwrap_or_default(),
-            );
+            return (0, serde_json::to_string(&output).unwrap_or_default());
         }
     }
 
-    // Set status to active
-    instances::set_status(db, instance_name, ST_ACTIVE, "prompt", "", "", None, None);
+    instances::set_status(db, instance_name, ST_ACTIVE, "prompt", Default::default());
     (0, String::new())
 }
 
-// ==================== Notification (1E.9) ====================
+/// Parent PermissionRequest: mark instance blocked immediately on approval UI.
+fn handle_permission_request(
+    db: &HcomDb,
+    payload: &HookPayload,
+    instance_name: &str,
+    updates: &serde_json::Map<String, Value>,
+) -> (i32, String) {
+    if !updates.is_empty() {
+        instances::update_instance_position(db, instance_name, updates);
+    }
 
-/// Parent Notification: update status to blocked.
+    let detail = family::extract_tool_detail("claude", &payload.tool_name, &payload.tool_input);
+    instances::set_status(
+        db,
+        instance_name,
+        ST_BLOCKED,
+        "approval",
+        instances::StatusUpdate {
+            detail: &detail,
+            ..Default::default()
+        },
+    );
+    (0, String::new())
+}
+
+/// Parent Notification: map Claude notification types to hcom lifecycle state.
 fn handle_notify(
     db: &HcomDb,
     payload: &HookPayload,
     instance_name: &str,
     updates: &serde_json::Map<String, Value>,
 ) -> (i32, String) {
+    if !updates.is_empty() {
+        instances::update_instance_position(db, instance_name, updates);
+    }
+
     let message = payload
         .raw
         .get("message")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // Filter out generic "waiting for input"
+    match payload.notification_type.as_deref() {
+        Some("idle_prompt") => {
+            instances::set_status(db, instance_name, ST_LISTENING, "", Default::default());
+            common::notify_hook_instance_with_db(db, instance_name);
+            return (0, String::new());
+        }
+        Some("permission_prompt") => {
+            // PermissionRequest owns blocked state and carries tool detail.
+            return (0, String::new());
+        }
+        Some("elicitation_dialog") => {
+            instances::set_status(
+                db,
+                instance_name,
+                ST_BLOCKED,
+                "approval",
+                Default::default(),
+            );
+            return (0, String::new());
+        }
+        Some("auth_success") => return (0, String::new()),
+        Some(other) => {
+            log::log_warn(
+                "hooks",
+                "claude.notify.unknown_type",
+                &format!("instance={} notification_type={}", instance_name, other),
+            );
+        }
+        None => {}
+    }
+
+    // Back-compat fallback for older Claude payloads that only include free-form text.
     if message == "Claude is waiting for your input" {
+        instances::set_status(db, instance_name, ST_LISTENING, "", Default::default());
+        common::notify_hook_instance_with_db(db, instance_name);
         return (0, String::new());
     }
-
-    if !updates.is_empty() {
-        instances::update_instance_position(db, instance_name, updates);
+    if message.starts_with("Claude needs your permission") {
+        instances::set_status(
+            db,
+            instance_name,
+            ST_BLOCKED,
+            "approval",
+            Default::default(),
+        );
+        return (0, String::new());
     }
-    instances::set_status(db, instance_name, ST_BLOCKED, message, "", "", None, None);
     (0, String::new())
 }
-
-// ==================== SessionEnd (1E.10) ====================
 
 /// Parent SessionEnd: finalize session and stop instance.
 fn handle_sessionend(
@@ -1288,34 +1313,6 @@ fn handle_sessionend(
     (0, String::new())
 }
 
-// ==================== Subagent Context (1E.11) ====================
-
-/// Check if session is in subagent context (Task active).
-pub fn in_subagent_context(db: &HcomDb, session_id: &str) -> bool {
-    // Try as session_id first (fast path for hooks)
-    let instance_name = match db.get_session_binding(session_id) {
-        Ok(Some(name)) => name,
-        _ => session_id.to_string(), // Try as instance name
-    };
-
-    let row: Option<Option<String>> = db
-        .conn()
-        .query_row(
-            "SELECT running_tasks FROM instances WHERE name = ? LIMIT 1",
-            rusqlite::params![instance_name],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .ok();
-
-    match row {
-        Some(Some(rt_json)) if !rt_json.is_empty() => {
-            let rt = instances::parse_running_tasks(Some(&rt_json));
-            rt.active
-        }
-        _ => false,
-    }
-}
-
 /// Track subagent in parent's running_tasks.
 fn track_subagent(db: &HcomDb, parent_session_id: &str, agent_id: &str, agent_type: &str) {
     log::log_info(
@@ -1337,16 +1334,14 @@ fn track_subagent(db: &HcomDb, parent_session_id: &str, agent_id: &str, agent_ty
         _ => return,
     };
 
-    let mut running_tasks =
-        instances::parse_running_tasks(instance_data.running_tasks.as_deref());
+    let mut running_tasks = instances::parse_running_tasks(instance_data.running_tasks.as_deref());
     running_tasks.active = true;
 
     // Add subagent if not already tracked
-    let already_tracked = running_tasks.subagents.iter().any(|s| {
-        s.get("agent_id")
-            .and_then(|v| v.as_str())
-            == Some(agent_id)
-    });
+    let already_tracked = running_tasks
+        .subagents
+        .iter()
+        .any(|s| s.get("agent_id").and_then(|v| v.as_str()) == Some(agent_id));
 
     if !already_tracked {
         running_tasks.subagents.push(serde_json::json!({
@@ -1370,16 +1365,15 @@ fn remove_subagent_from_parent(db: &HcomDb, parent_name: &str, agent_id: &str) {
         _ => return,
     };
 
-    let mut running_tasks =
-        instances::parse_running_tasks(parent_data.running_tasks.as_deref());
+    let mut running_tasks = instances::parse_running_tasks(parent_data.running_tasks.as_deref());
 
     if running_tasks.subagents.is_empty() {
         return;
     }
 
-    running_tasks.subagents.retain(|s| {
-        s.get("agent_id").and_then(|v| v.as_str()) != Some(agent_id)
-    });
+    running_tasks
+        .subagents
+        .retain(|s| s.get("agent_id").and_then(|v| v.as_str()) != Some(agent_id));
 
     if running_tasks.subagents.is_empty() {
         running_tasks.active = false;
@@ -1402,7 +1396,8 @@ fn check_dead_subagents(
     subagent_timeout: Option<i64>,
 ) -> Vec<String> {
     let timeout = subagent_timeout.unwrap_or_else(|| {
-        HcomConfig::load(None).ok()
+        HcomConfig::load(None)
+            .ok()
             .map(|c| c.subagent_timeout)
             .unwrap_or(120)
     });
@@ -1414,7 +1409,7 @@ fn check_dead_subagents(
     };
 
     let mut dead = Vec::new();
-    let now = crate::shared::constants::now_epoch_i64() as u64;
+    let now = crate::shared::time::now_epoch_i64() as u64;
 
     for subagent in &running_tasks.subagents {
         let agent_id = match subagent.get("agent_id").and_then(|v| v.as_str()) {
@@ -1497,8 +1492,12 @@ fn cleanup_dead_subagents(db: &HcomDb, session_id: &str, transcript_path: &str) 
         return;
     }
 
-    let dead_ids =
-        check_dead_subagents(db, transcript_path, &running_tasks, instance_data.subagent_timeout);
+    let dead_ids = check_dead_subagents(
+        db,
+        transcript_path,
+        &running_tasks,
+        instance_data.subagent_timeout,
+    );
     if dead_ids.is_empty() {
         return;
     }
@@ -1513,17 +1512,12 @@ fn cleanup_dead_subagents(db: &HcomDb, session_id: &str, transcript_path: &str) 
                 &name,
                 ST_INACTIVE,
                 "exit:interrupted",
-                "",
-                "",
-                None,
-                None,
+                Default::default(),
             );
             common::stop_instance(db, &name, "system", "interrupted");
         }
     }
 }
-
-// ==================== SubagentStart (1E.7) ====================
 
 /// SubagentStart: surface agent_id to subagent.
 fn subagent_start(raw: &Value) -> Option<Value> {
@@ -1539,8 +1533,6 @@ fn subagent_start(raw: &Value) -> Option<Value> {
         }
     }))
 }
-
-// ==================== SubagentStop (1E.8) ====================
 
 /// SubagentStop: message polling using agent_id, cleanup on exit.
 ///
@@ -1594,7 +1586,8 @@ fn subagent_stop(db: &HcomDb, raw: &Value, session_id: &str) -> (i32, String) {
         .and_then(|pn| db.get_instance_full(pn).ok().flatten())
         .and_then(|pd| pd.subagent_timeout)
         .unwrap_or_else(|| {
-            HcomConfig::load(None).ok()
+            HcomConfig::load(None)
+                .ok()
                 .map(|c| c.subagent_timeout)
                 .unwrap_or(120)
         }) as u64;
@@ -1609,16 +1602,17 @@ fn subagent_stop(db: &HcomDb, raw: &Value, session_id: &str) -> (i32, String) {
     // exit_code=2: message delivered, subagent continues
     // exit_code=0: no message/timeout, cleanup
     if exit_code == 0 {
-        let reason = if timed_out { "timeout" } else { "task_completed" };
+        let reason = if timed_out {
+            "timeout"
+        } else {
+            "task_completed"
+        };
         instances::set_status(
             db,
             &subagent_name,
             ST_INACTIVE,
             &format!("exit:{}", reason),
-            "",
-            "",
-            None,
-            None,
+            Default::default(),
         );
         if let Some(ref pn) = parent_name {
             remove_subagent_from_parent(db, pn, agent_id);
@@ -1629,19 +1623,12 @@ fn subagent_stop(db: &HcomDb, raw: &Value, session_id: &str) -> (i32, String) {
     (exit_code, stdout)
 }
 
-// ==================== Subagent PostToolUse ====================
-
 /// Subagent PostToolUse: message delivery for subagents running hcom commands.
 ///
 /// Returns (exit_code, stdout).
 fn subagent_posttooluse(db: &HcomDb, raw: &Value) -> (i32, String) {
-    let tool_input = raw
-        .get("tool_input")
-        .unwrap_or(&Value::Null);
-    let tool_name = raw
-        .get("tool_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let tool_input = raw.get("tool_input").unwrap_or(&Value::Null);
+    let tool_name = raw.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
 
     if tool_name != "Bash" {
         return (0, String::new());
@@ -1719,10 +1706,10 @@ fn subagent_posttooluse(db: &HcomDb, raw: &Value) -> (i32, String) {
         &subagent_name,
         ST_ACTIVE,
         &format!("deliver:{}", display),
-        "",
-        msg_ts,
-        None,
-        None,
+        instances::StatusUpdate {
+            msg_ts,
+            ..Default::default()
+        },
     );
 
     let output = serde_json::json!({
@@ -1731,13 +1718,8 @@ fn subagent_posttooluse(db: &HcomDb, raw: &Value) -> (i32, String) {
             "additionalContext": formatted,
         }
     });
-    (
-        0,
-        serde_json::to_string(&output).unwrap_or_default(),
-    )
+    (0, serde_json::to_string(&output).unwrap_or_default())
 }
-
-// ==================== Vanilla Binding ====================
 
 /// Detect and process vanilla instance binding from `hcom start` output.
 fn bind_vanilla_from_marker(
@@ -1807,17 +1789,12 @@ fn bind_vanilla_from_marker(
     );
 
     let mut updates = serde_json::Map::new();
-    updates.insert(
-        "session_id".into(),
-        Value::String(session_id.to_string()),
-    );
+    updates.insert("session_id".into(), Value::String(session_id.to_string()));
     updates.insert("tool".into(), Value::String("claude".to_string()));
     instances::update_instance_position(db, instance_name, &updates);
 
     Some(instance_name.to_string())
 }
-
-// ==================== Helpers ====================
 
 /// Convert a Message to a JSON Value for hook delivery.
 ///
@@ -1834,7 +1811,6 @@ fn extract_name(command: &str) -> Option<String> {
         .map(|m| m.as_str().to_string())
 }
 
-// ==================== Settings Management (1E.13) ====================
 //
 // Manages hook installation in ~/.claude/settings.json.
 
@@ -1848,6 +1824,7 @@ const CLAUDE_HOOK_CONFIGS: &[(&str, &str, &str, Option<u64>)] = &[
     ("PreToolUse", "Bash|Task|Write|Edit", "pre", None),
     ("PostToolUse", "", "post", Some(86400)),
     ("Stop", "", "poll", Some(86400)),
+    ("PermissionRequest", "", "permission-request", None),
     ("SubagentStart", "", "subagent-start", None),
     ("SubagentStop", "", "subagent-stop", Some(86400)),
     ("Notification", "", "notify", None),
@@ -1856,25 +1833,39 @@ const CLAUDE_HOOK_CONFIGS: &[(&str, &str, &str, Option<u64>)] = &[
 
 /// Hook command suffixes for pattern detection.
 const CLAUDE_HOOK_COMMANDS: &[&str] = &[
-    "sessionstart", "userpromptsubmit", "pre", "post", "poll",
-    "subagent-start", "subagent-stop", "notify", "sessionend",
+    "sessionstart",
+    "userpromptsubmit",
+    "pre",
+    "post",
+    "poll",
+    "permission-request",
+    "subagent-start",
+    "subagent-stop",
+    "notify",
+    "sessionend",
 ];
 
 /// Claude hook types for cleanup iteration.
 const CLAUDE_HOOK_TYPES: &[&str] = &[
-    "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop",
-    "SubagentStart", "SubagentStop", "Notification", "SessionEnd",
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+    "PermissionRequest",
+    "SubagentStart",
+    "SubagentStop",
+    "Notification",
+    "SessionEnd",
 ];
 
 // Static regexes for hot-path hook command detection
-static RE_NAME_FLAG: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"--name\s+(\S+)").unwrap());
+static RE_NAME_FLAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"--name\s+(\S+)").unwrap());
 static RE_HCOM_COMMANDS: LazyLock<Regex> = LazyLock::new(|| {
     let pattern = CLAUDE_HOOK_COMMANDS.join("|");
     Regex::new(&format!(r"\bhcom\s+({})\b", pattern)).unwrap()
 });
-static RE_HCOM_CLAUDE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\bhcom\s+claude-").unwrap());
+static RE_HCOM_CLAUDE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bhcom\s+claude-").unwrap());
 static RE_UVX_HCOM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\buvx\s+hcom\s+claude-").unwrap());
 static RE_HCOM_ACTIVE: LazyLock<Regex> =
@@ -1883,8 +1874,7 @@ static RE_HCOM_PY_COMMANDS: LazyLock<Regex> = LazyLock::new(|| {
     let pattern = CLAUDE_HOOK_COMMANDS.join("|");
     Regex::new(&format!(r#"hcom\.py["']?\s+({})\b"#, pattern)).unwrap()
 });
-static RE_SH_HCOM: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"sh\s+-c.*hcom").unwrap());
+static RE_SH_HCOM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"sh\s+-c.*hcom").unwrap());
 
 /// Get path to Claude settings.json.
 ///
@@ -1892,7 +1882,9 @@ static RE_SH_HCOM: LazyLock<Regex> =
 /// - HCOM_DIR set → project_root is HCOM_DIR parent → {parent}/.claude/settings.json
 /// - Otherwise → ~/.hcom parent = ~ → ~/.claude/settings.json
 pub fn get_claude_settings_path() -> PathBuf {
-    paths::get_project_root().join(".claude").join("settings.json")
+    paths::get_project_root()
+        .join(".claude")
+        .join("settings.json")
 }
 
 /// Load and parse Claude settings.json. Returns None on error or missing file.
@@ -1914,7 +1906,7 @@ fn format_claude_permission(prefix: &str, cmd: &str) -> String {
 
 /// Build permission patterns for installation using detected prefix.
 fn build_claude_permissions() -> Vec<String> {
-    let prefix = super::common::build_hcom_command();
+    let prefix = crate::runtime_env::build_hcom_command();
     SAFE_HCOM_COMMANDS
         .iter()
         .map(|cmd| format_claude_permission(&prefix, cmd))
@@ -2035,10 +2027,7 @@ fn remove_hcom_hooks_from_settings(settings: &mut Value) -> bool {
             let non_hcom_hooks: Vec<&Value> = hooks_field
                 .iter()
                 .filter(|hook| {
-                    let command = hook
-                        .get("command")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let command = hook.get("command").and_then(|v| v.as_str()).unwrap_or("");
                     !is_hcom_hook_command(command)
                 })
                 .collect();
@@ -2050,9 +2039,7 @@ fn remove_hcom_hooks_from_settings(settings: &mut Value) -> bool {
             // Only keep matcher if it has non-hcom hooks remaining
             if !non_hcom_hooks.is_empty() {
                 let mut matcher_copy = matcher.clone();
-                matcher_copy["hooks"] = Value::Array(
-                    non_hcom_hooks.into_iter().cloned().collect(),
-                );
+                matcher_copy["hooks"] = Value::Array(non_hcom_hooks.into_iter().cloned().collect());
                 updated_matchers.push(matcher_copy);
             }
             // If all hooks were hcom, drop the entire matcher
@@ -2114,9 +2101,8 @@ pub fn setup_claude_hooks(include_permissions: bool) -> bool {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let mut settings = load_claude_settings(&settings_path).unwrap_or_else(|| {
-        serde_json::json!({})
-    });
+    let mut settings =
+        load_claude_settings(&settings_path).unwrap_or_else(|| serde_json::json!({}));
 
     // Normalize hooks dict
     if !settings.get("hooks").is_some_and(|v| v.is_object()) {
@@ -2131,7 +2117,10 @@ pub fn setup_claude_hooks(include_permissions: bool) -> bool {
 
     for &(hook_type, matcher, cmd_suffix, timeout) in CLAUDE_HOOK_CONFIGS {
         // Initialize or normalize hook_type to array
-        if !settings["hooks"].get(hook_type).is_some_and(|v| v.is_array()) {
+        if !settings["hooks"]
+            .get(hook_type)
+            .is_some_and(|v| v.is_array())
+        {
             settings["hooks"][hook_type] = serde_json::json!([]);
         }
 
@@ -2162,7 +2151,7 @@ pub fn setup_claude_hooks(include_permissions: bool) -> bool {
     if !settings.get("env").is_some_and(|v| v.is_object()) {
         settings["env"] = serde_json::json!({});
     }
-    settings["env"]["HCOM"] = Value::String(super::common::build_hcom_command());
+    settings["env"]["HCOM"] = Value::String(crate::runtime_env::build_hcom_command());
     // Remove stale HCOM_DIR from settings
     if let Some(env) = settings["env"].as_object_mut() {
         env.remove("HCOM_DIR");
@@ -2188,7 +2177,10 @@ pub fn setup_claude_hooks(include_permissions: bool) -> bool {
         }
     } else {
         // Remove hcom permissions if disabled
-        if let Some(perms) = settings.get_mut("permissions").and_then(|v| v.as_object_mut()) {
+        if let Some(perms) = settings
+            .get_mut("permissions")
+            .and_then(|v| v.as_object_mut())
+        {
             if let Some(allow) = perms.get_mut("allow").and_then(|v| v.as_array_mut()) {
                 let hcom_perms = build_claude_permissions();
                 allow.retain(|p| {
@@ -2259,7 +2251,8 @@ pub fn verify_claude_hooks_installed(
 
             for hook in hooks_list {
                 let command = hook.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                let has_hcom = command.contains("${HCOM}") || command.to_lowercase().contains("hcom");
+                let has_hcom =
+                    command.contains("${HCOM}") || command.to_lowercase().contains("hcom");
                 if has_hcom && command.contains(cmd_suffix) {
                     if hcom_hook_found {
                         // Duplicate hcom hook
@@ -2292,11 +2285,7 @@ pub fn verify_claude_hooks_installed(
     }
 
     // Check HCOM env var
-    if settings
-        .get("env")
-        .and_then(|v| v.get("HCOM"))
-        .is_none()
-    {
+    if settings.get("env").and_then(|v| v.get("HCOM")).is_none() {
         return false;
     }
 
@@ -2365,8 +2354,6 @@ pub fn remove_claude_hooks() -> bool {
     global_ok && local_ok
 }
 
-// ==================== Tests ====================
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2381,7 +2368,8 @@ mod tests {
     fn test_get_real_session_id_fork() {
         crate::config::Config::init(); // log_info needs Config
         let raw = serde_json::json!({"session": {"session_id": "old-parent-id"}});
-        let env_file = "/home/user/.claude/session-env/12345678-1234-1234-1234-123456789012/hook-1.sh";
+        let env_file =
+            "/home/user/.claude/session-env/12345678-1234-1234-1234-123456789012/hook-1.sh";
         assert_eq!(
             get_real_session_id(&raw, Some(env_file), true),
             "12345678-1234-1234-1234-123456789012"
@@ -2393,7 +2381,10 @@ mod tests {
         let raw = serde_json::json!({"session": {"session_id": "correct-id"}});
         let env_file = "/home/user/.claude/session-env/wrong-id-from-env-file-path/hook-1.sh";
         // is_fork=false, so env_file should be ignored
-        assert_eq!(get_real_session_id(&raw, Some(env_file), false), "correct-id");
+        assert_eq!(
+            get_real_session_id(&raw, Some(env_file), false),
+            "correct-id"
+        );
     }
 
     #[test]
@@ -2493,8 +2484,6 @@ mod tests {
         assert_eq!(caps.unwrap().get(1).unwrap().as_str(), "nova");
     }
 
-    // ==================== Settings Tests ====================
-
     #[test]
     fn test_is_hcom_hook_command() {
         assert!(is_hcom_hook_command("${HCOM} sessionstart"));
@@ -2584,9 +2573,9 @@ mod tests {
 
     #[test]
     fn test_claude_hook_configs_count() {
-        assert_eq!(CLAUDE_HOOK_CONFIGS.len(), 9);
-        assert_eq!(CLAUDE_HOOK_TYPES.len(), 9);
-        assert_eq!(CLAUDE_HOOK_COMMANDS.len(), 9);
+        assert_eq!(CLAUDE_HOOK_CONFIGS.len(), 10);
+        assert_eq!(CLAUDE_HOOK_TYPES.len(), 10);
+        assert_eq!(CLAUDE_HOOK_COMMANDS.len(), 10);
     }
 
     #[test]
@@ -2662,16 +2651,10 @@ mod tests {
         std::fs::write(&settings_path, &json_str).unwrap();
 
         // Verify should pass
-        assert!(verify_claude_hooks_installed(
-            Some(&settings_path),
-            true,
-        ));
+        assert!(verify_claude_hooks_installed(Some(&settings_path), true,));
 
         // Verify without permissions check
-        assert!(verify_claude_hooks_installed(
-            Some(&settings_path),
-            false,
-        ));
+        assert!(verify_claude_hooks_installed(Some(&settings_path), false,));
     }
 
     #[test]
@@ -2679,10 +2662,7 @@ mod tests {
         crate::config::Config::init();
         let dir = tempfile::tempdir().unwrap();
         let settings_path = dir.path().join("nonexistent.json");
-        assert!(!verify_claude_hooks_installed(
-            Some(&settings_path),
-            false,
-        ));
+        assert!(!verify_claude_hooks_installed(Some(&settings_path), false,));
     }
 
     #[test]
@@ -2702,10 +2682,7 @@ mod tests {
         });
         std::fs::write(&settings_path, serde_json::to_string(&settings).unwrap()).unwrap();
 
-        assert!(!verify_claude_hooks_installed(
-            Some(&settings_path),
-            false,
-        ));
+        assert!(!verify_claude_hooks_installed(Some(&settings_path), false,));
     }
 
     #[test]
@@ -2740,10 +2717,8 @@ mod tests {
         assert_eq!(result["other_key"], "preserved");
     }
 
-    // ==================== Claude Hook Property Tests ====================
-
-    use serial_test::serial;
     use crate::hooks::test_helpers::{EnvGuard, isolated_test_env};
+    use serial_test::serial;
 
     fn claude_test_env() -> (tempfile::TempDir, PathBuf, PathBuf, EnvGuard) {
         let (dir, _hcom_dir, test_home, guard) = isolated_test_env();
@@ -2777,9 +2752,7 @@ mod tests {
                 for (j, hook) in hooks_arr.iter().enumerate() {
                     let command = hook.get("command").and_then(|v| v.as_str()).unwrap_or("");
                     if hcom_patterns.iter().any(|p| command.contains(p)) {
-                        violations.push(format!(
-                            "{hook_type}[{i}].hooks[{j}]: command={command}"
-                        ));
+                        violations.push(format!("{hook_type}[{i}].hooks[{j}]: command={command}"));
                     }
                 }
             }
@@ -2887,7 +2860,10 @@ mod tests {
                     }
                 }
             }
-            assert!(found, "{hook_type}: expected exact command '{expected_command}', not found");
+            assert!(
+                found,
+                "{hook_type}: expected exact command '{expected_command}', not found"
+            );
         }
 
         // HCOM env var should be set
@@ -3042,10 +3018,14 @@ mod tests {
         let expected = vec![
             ("PostToolUse", "post"),
             ("Stop", "poll"),
+            ("PermissionRequest", "permission-request"),
             ("Notification", "notify"),
         ];
         let missing = independently_verify_hcom_hooks_present_claude(&after_setup, &expected);
-        assert!(missing.is_empty(), "after setup, missing hooks: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "after setup, missing hooks: {missing:?}"
+        );
 
         // Remove
         assert!(remove_hooks_from_settings_path(&settings_path));
@@ -3058,7 +3038,10 @@ mod tests {
 
         // User data preserved
         assert_eq!(after_remove["env"]["MY_VAR"], "test");
-        assert_eq!(after_remove["permissions"]["deny"], serde_json::json!(["dangerous"]));
+        assert_eq!(
+            after_remove["permissions"]["deny"],
+            serde_json::json!(["dangerous"])
+        );
 
         drop(_guard);
     }

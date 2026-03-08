@@ -13,10 +13,22 @@ const FILTER_HELP: &[HelpEntry] = &[
     ("  --agent NAME", "Agent name"),
     ("  --type TYPE", "message | status | life"),
     ("  --status VAL", "listening | active | blocked"),
-    ("  --context PATTERN", "tool:Bash | deliver:X (supports * wildcard)"),
-    ("  --action VAL", "created | started | ready | stopped | batch_launched"),
-    ("  --cmd PATTERN", "Shell command (contains, ^prefix, $suffix, =exact, *glob)"),
-    ("  --file PATH", "File write (*.py for glob, file.py for contains)"),
+    (
+        "  --context PATTERN",
+        "tool:Bash | deliver:X (supports * wildcard)",
+    ),
+    (
+        "  --action VAL",
+        "created | started | ready | stopped | batch_launched",
+    ),
+    (
+        "  --cmd PATTERN",
+        "Shell command (contains, ^prefix, $suffix, =exact, *glob)",
+    ),
+    (
+        "  --file PATH",
+        "File write (*.py for glob, file.py for contains)",
+    ),
     ("  --collision", "Two agents edit same file within 30s"),
     ("  --from NAME", "Sender"),
     ("  --mention NAME", "@mention target"),
@@ -29,7 +41,10 @@ const FILTER_HELP: &[HelpEntry] = &[
 // ── Per-command help registries ─────────────────────────────────────────
 
 const EVENTS_HELP: &[HelpEntry] = &[
-    ("", "Query the event stream (messages, status changes, file edits, lifecycle)"),
+    (
+        "",
+        "Query the event stream (messages, status changes, file edits, lifecycle)",
+    ),
     ("", ""),
     ("Query:", ""),
     ("  events", "Last 20 events as JSON"),
@@ -46,10 +61,19 @@ const EVENTS_HELP_2: &[HelpEntry] = &[
     ("  --idle NAME", "--agent NAME --status listening"),
     ("  --blocked NAME", "--agent NAME --status blocked"),
     ("", ""),
-    ("Subscribe (next matching event delivered as messages from [hcom-events]):", ""),
+    (
+        "Subscribe (next matching event delivered as messages from [hcom-events]):",
+        "",
+    ),
     ("  events sub list", "List active subscriptions"),
-    ("  events sub [filters] [--once]", "Subscribe using filter flags (listed above)"),
-    ("  events sub \"SQL WHERE\" [--once]", "Subscribe using raw SQL"),
+    (
+        "  events sub [filters] [--once]",
+        "Subscribe using filter flags (listed above)",
+    ),
+    (
+        "  events sub \"SQL WHERE\" [--once]",
+        "Subscribe using raw SQL",
+    ),
     ("    --once", "Auto-remove after first match"),
     ("    --for <name>", "Subscribe on behalf of another agent"),
     ("  events unsub <id>", "Remove subscription"),
@@ -57,21 +81,33 @@ const EVENTS_HELP_2: &[HelpEntry] = &[
     ("Examples:", ""),
     ("  events --cmd git --agent peso", ""),
     ("  events sub --idle peso", "Notified when peso goes idle"),
-    ("  events sub --file '*.py' --once", "One-shot: next .py file write"),
+    (
+        "  events sub --file '*.py' --once",
+        "One-shot: next .py file write",
+    ),
     ("", ""),
     ("SQL reference (events_v view):", ""),
     ("  Base", "id, timestamp, type, instance"),
-    ("  msg_*", "from, text, scope, sender_kind, delivered_to[], mentions[], intent, thread, reply_to"),
+    (
+        "  msg_*",
+        "from, text, scope, sender_kind, delivered_to[], mentions[], intent, thread, reply_to",
+    ),
     ("  status_*", "val, context, detail"),
     ("  life_*", "action, by, batch_id, reason"),
     ("", ""),
     ("  type", "message, status, life"),
     ("  msg_scope", "broadcast, mentions"),
     ("  msg_sender_kind", "instance, external, system"),
-    ("  status_context", "tool:X, deliver:X, approval, prompt, exit:X"),
+    (
+        "  status_context",
+        "tool:X, deliver:X, approval, prompt, exit:X",
+    ),
     ("  life_action", "created, ready, stopped, batch_launched"),
     ("", ""),
-    ("", "delivered_to/mentions are JSON arrays \u{2014} use LIKE '%name%' not = 'name'"),
+    (
+        "",
+        "delivered_to/mentions are JSON arrays \u{2014} use LIKE '%name%' not = 'name'",
+    ),
     ("", "Use <> instead of != for SQL negation"),
 ];
 
@@ -80,15 +116,33 @@ const LIST_HELP: &[HelpEntry] = &[
     ("  -v", "Verbose (directory, session, etc)"),
     ("  --json", "JSON array of all agents"),
     ("  --names", "Just names, one per line"),
-    ("  --format TPL", "Template per agent: --format '{name} {status}'"),
-    ("", "  Fields: name, base_name, status, status_context, status_detail,"),
-    ("", "  status_age_seconds, description, unread_count, tool, tag, directory,"),
-    ("", "  session_id, parent_name, agent_id, headless, created_at,"),
-    ("", "  hooks_bound, process_bound, transcript_path, background_log_file,"),
+    (
+        "  --format TPL",
+        "Template per agent: --format '{name} {status}'",
+    ),
+    (
+        "",
+        "  Fields: name, base_name, status, status_context, status_detail,",
+    ),
+    (
+        "",
+        "  status_age_seconds, description, unread_count, tool, tag, directory,",
+    ),
+    (
+        "",
+        "  session_id, parent_name, agent_id, headless, created_at,",
+    ),
+    (
+        "",
+        "  hooks_bound, process_bound, transcript_path, background_log_file,",
+    ),
     ("", "  launch_context"),
     ("", ""),
     ("list [self|<name>]", "Single agent details"),
-    ("  [field]", "Print specific field (status, directory, session_id, ...)"),
+    (
+        "  [field]",
+        "Print specific field (status, directory, session_id, ...)",
+    ),
     ("  --json", "Output as JSON"),
     ("  --sh", "Shell exports: eval \"$(hcom list self --sh)\""),
     ("", ""),
@@ -96,15 +150,24 @@ const LIST_HELP: &[HelpEntry] = &[
     ("  --all", "All stopped (default: last 20)"),
     ("", ""),
     ("Status icons:", ""),
-    ("", "\u{25b6}  active      processing, reads messages very soon"),
+    (
+        "",
+        "\u{25b6}  active      processing, reads messages very soon",
+    ),
     ("", "\u{25c9}  listening   idle, reads messages in <1s"),
     ("", "\u{25a0}  blocked     needs human approval"),
     ("", "\u{25cb}  inactive    dead or stale"),
     ("", "\u{25e6}  unknown     neutral"),
     ("", ""),
     ("Tool labels:", ""),
-    ("", "[CLAUDE] [GEMINI] [CODEX] [OPENCODE]  hcom-launched (PTY + hooks)"),
-    ("", "[claude] [gemini] [codex] [opencode]  vanilla (hooks only)"),
+    (
+        "",
+        "[CLAUDE] [GEMINI] [CODEX] [OPENCODE]  hcom-launched (PTY + hooks)",
+    ),
+    (
+        "",
+        "[claude] [gemini] [codex] [opencode]  vanilla (hooks only)",
+    ),
     ("", "[AD-HOC]                              manual polling"),
 ];
 
@@ -115,7 +178,10 @@ const SEND_HELP: &[HelpEntry] = &[
     ("  send -- message text", "Broadcast to all"),
     ("  send @name", "Message from stdin (pipe or heredoc)"),
     ("  send @name --file <path>", "Message from file"),
-    ("  send @name --base64 <encoded>", "Message from base64 string"),
+    (
+        "  send @name --base64 <encoded>",
+        "Message from base64 string",
+    ),
     ("", ""),
     ("", "Everything after -- is the message (no quotes needed)."),
     ("", "All flags must come before --."),
@@ -125,7 +191,10 @@ const SEND_HELP: &[HelpEntry] = &[
     ("  @api-luna", "exact full name"),
     ("  @api-", "prefix: all with tag 'api'"),
     ("  @luna:BOXE", "remote agent on another device"),
-    ("", "Underscore blocks prefix: @luna does NOT match luna_reviewer_1"),
+    (
+        "",
+        "Underscore blocks prefix: @luna does NOT match luna_reviewer_1",
+    ),
     ("", ""),
     ("Envelope:", ""),
     ("  --intent <type>", "request | inform | ack"),
@@ -141,16 +210,25 @@ const SEND_HELP: &[HelpEntry] = &[
     ("", ""),
     ("Inline bundle (attach structured context):", ""),
     ("  --title <text>", "Create and attach bundle inline"),
-    ("  --description <text>", "Bundle description (required with --title)"),
+    (
+        "  --description <text>",
+        "Bundle description (required with --title)",
+    ),
     ("  --events <ids>", "Event IDs/ranges: 1,2,5-10"),
     ("  --files <paths>", "Comma-separated file paths"),
-    ("  --transcript <ranges>", "Format: 3-14:normal,6:full,22-30:detailed"),
+    (
+        "  --transcript <ranges>",
+        "Format: 3-14:normal,6:full,22-30:detailed",
+    ),
     ("  --extends <id>", "Parent bundle (optional)"),
     ("", "See 'hcom bundle --help' for bundle details"),
     ("", ""),
     ("Examples:", ""),
     ("  hcom send @luna -- Hello there!", ""),
-    ("  hcom send @luna @nova --intent request -- Can you help?", ""),
+    (
+        "  hcom send @luna @nova --intent request -- Can you help?",
+        "",
+    ),
     ("  hcom send -- Broadcast message to everyone", ""),
     ("  echo 'Complex message' | hcom send @luna", ""),
     ("  hcom send @luna <<'EOF'", ""),
@@ -165,29 +243,68 @@ const BUNDLE_HELP: &[HelpEntry] = &[
     ("  --json", "Output JSON"),
     ("", ""),
     ("bundle cat <id>", "Expand full bundle content"),
-    ("", "Shows: metadata, files (metadata only), transcript (respects detail level), events"),
+    (
+        "",
+        "Shows: metadata, files (metadata only), transcript (respects detail level), events",
+    ),
     ("", ""),
     ("bundle prepare", "Show recent context, suggest template"),
-    ("  --for <agent>", "Prepare for specific agent (default: self)"),
-    ("  --last-transcript N", "Transcript entries to suggest (default: 20)"),
-    ("  --last-events N", "Events to scan per category (default: 30)"),
+    (
+        "  --for <agent>",
+        "Prepare for specific agent (default: self)",
+    ),
+    (
+        "  --last-transcript N",
+        "Transcript entries to suggest (default: 20)",
+    ),
+    (
+        "  --last-events N",
+        "Events to scan per category (default: 30)",
+    ),
     ("  --json", "Output JSON"),
     ("  --compact", "Hide how-to section"),
-    ("", "Shows suggested transcript ranges, relevant events, files"),
+    (
+        "",
+        "Shows suggested transcript ranges, relevant events, files",
+    ),
     ("", "Outputs ready-to-use bundle create command"),
-    ("", "TIP: Skip 'bundle create' \u{2014} use bundle flags directly in 'hcom send'"),
+    (
+        "",
+        "TIP: Skip 'bundle create' \u{2014} use bundle flags directly in 'hcom send'",
+    ),
     ("", ""),
     ("bundle show <id>", "Show bundle by id/prefix"),
     ("  --json", "Output JSON"),
     ("", ""),
-    ("bundle create \"title\"", "Create bundle (positional or --title)"),
-    ("  --title <text>", "Bundle title (alternative to positional)"),
+    (
+        "bundle create \"title\"",
+        "Create bundle (positional or --title)",
+    ),
+    (
+        "  --title <text>",
+        "Bundle title (alternative to positional)",
+    ),
     ("  --description <text>", "Bundle description (required)"),
-    ("  --events 1,2,5-10", "Event IDs/ranges, comma-separated (required)"),
-    ("  --files a.py,b.py", "Comma-separated file paths (required)"),
-    ("  --transcript RANGES", "Transcript with detail levels (required)"),
-    ("", "    Format: range:detail (3-14:normal,6:full,22-30:detailed)"),
-    ("", "    normal = truncated | full = complete | detailed = tools+edits"),
+    (
+        "  --events 1,2,5-10",
+        "Event IDs/ranges, comma-separated (required)",
+    ),
+    (
+        "  --files a.py,b.py",
+        "Comma-separated file paths (required)",
+    ),
+    (
+        "  --transcript RANGES",
+        "Transcript with detail levels (required)",
+    ),
+    (
+        "",
+        "    Format: range:detail (3-14:normal,6:full,22-30:detailed)",
+    ),
+    (
+        "",
+        "    normal = truncated | full = complete | detailed = tools+edits",
+    ),
     ("  --extends <id>", "Parent bundle for chaining"),
     ("  --bundle JSON", "Create from JSON payload"),
     ("  --bundle-file FILE", "Create from JSON file"),
@@ -196,11 +313,20 @@ const BUNDLE_HELP: &[HelpEntry] = &[
     ("JSON format:", ""),
     ("", "{"),
     ("", "  \"title\": \"Bundle Title\","),
-    ("", "  \"description\": \"What happened, decisions, state, next steps\","),
+    (
+        "",
+        "  \"description\": \"What happened, decisions, state, next steps\",",
+    ),
     ("", "  \"refs\": {"),
     ("", "    \"events\": [\"123\", \"124-130\"],"),
-    ("", "    \"files\": [\"src/auth.py\", \"tests/test_auth.py\"],"),
-    ("", "    \"transcript\": [\"10-15:normal\", \"20:full\", \"30-35:detailed\"]"),
+    (
+        "",
+        "    \"files\": [\"src/auth.py\", \"tests/test_auth.py\"],",
+    ),
+    (
+        "",
+        "    \"transcript\": [\"10-15:normal\", \"20:full\", \"30-35:detailed\"]",
+    ),
     ("", "  },"),
     ("", "  \"extends\": \"bundle:abc123\""),
     ("", "}"),
@@ -220,11 +346,20 @@ const STOP_HELP: &[HelpEntry] = &[
 
 const START_HELP: &[HelpEntry] = &[
     ("start", "Connect to hcom (from inside any AI session)"),
-    ("start --as <name>", "Reclaim identity (after compaction/resume/clear)"),
-    ("start --orphan <name|pid>", "Recover orphaned PTY process from pidtrack"),
+    (
+        "start --as <name>",
+        "Reclaim identity (after compaction/resume/clear)",
+    ),
+    (
+        "start --orphan <name|pid>",
+        "Recover orphaned PTY process from pidtrack",
+    ),
     ("", ""),
     ("", ""),
-    ("", "Inside a sandbox? Prefix all hcom commands with: HCOM_DIR=$PWD/.hcom"),
+    (
+        "",
+        "Inside a sandbox? Prefix all hcom commands with: HCOM_DIR=$PWD/.hcom",
+    ),
 ];
 
 const KILL_HELP: &[HelpEntry] = &[
@@ -242,7 +377,10 @@ const LISTEN_HELP: &[HelpEntry] = &[
     ("", ""),
     ("Filter flags:", ""),
     ("", "Supports all filter flags from 'events' command"),
-    ("", "(--agent, --type, --status, --file, --cmd, --from, --intent, etc.)"),
+    (
+        "",
+        "(--agent, --type, --status, --file, --cmd, --from, --intent, etc.)",
+    ),
     ("", "Run 'hcom events --help' for full list"),
     ("", "Filters combine with --sql using AND logic"),
     ("", ""),
@@ -260,12 +398,18 @@ const LISTEN_HELP: &[HelpEntry] = &[
 
 const RESET_HELP: &[HelpEntry] = &[
     ("reset", "Archive conversation, clear database"),
-    ("reset all", "Stop all + clear db + remove hooks + reset config"),
+    (
+        "reset all",
+        "Stop all + clear db + remove hooks + reset config",
+    ),
     ("", ""),
     ("Sandbox / local mode:", ""),
     ("", "If you can't write to ~/.hcom, set:"),
     ("", "  export HCOM_DIR=\"$PWD/.hcom\""),
-    ("", "Hooks install under $PWD (.claude/.gemini/.codex) or ~/.config/opencode/, state in $HCOM_DIR"),
+    (
+        "",
+        "Hooks install under $PWD (.claude/.gemini/.codex) or ~/.config/opencode/, state in $HCOM_DIR",
+    ),
     ("", ""),
     ("", "To remove local setup:"),
     ("", "  hcom hooks remove && rm -rf \"$HCOM_DIR\""),
@@ -283,15 +427,24 @@ const CONFIG_HELP: &[HelpEntry] = &[
     ("  --json / --edit / --reset", ""),
     ("", ""),
     ("Per-agent:", ""),
-    ("config -i <name|self> [key] [val]", "tag, timeout, hints, subagent_timeout"),
+    (
+        "config -i <name|self> [key] [val]",
+        "tag, timeout, hints, subagent_timeout",
+    ),
     ("", ""),
     ("Keys:", ""),
     ("  tag", "Group/label (agents become tag-*)"),
     ("  terminal", "Where new agent windows open"),
     ("  hints", "Text appended to all messages agent receives"),
     ("  notes", "Notes appended to agent bootstrap"),
-    ("  subagent_timeout", "Subagent keep-alive seconds after task"),
-    ("  claude_args / gemini_args / codex_args / opencode_args", ""),
+    (
+        "  subagent_timeout",
+        "Subagent keep-alive seconds after task",
+    ),
+    (
+        "  claude_args / gemini_args / codex_args / opencode_args",
+        "",
+    ),
     ("  auto_approve", "Auto-approve safe hcom commands"),
     ("  auto_subscribe", "Event auto-subscribe presets"),
     ("  name_export", "Export agent name to custom env var"),
@@ -301,9 +454,10 @@ const CONFIG_HELP: &[HelpEntry] = &[
 ];
 
 // config help continued with dynamic config files hint
-const CONFIG_HELP_2: &[HelpEntry] = &[
-    ("", "HCOM_DIR: isolate per project (see 'hcom reset --help')"),
-];
+const CONFIG_HELP_2: &[HelpEntry] = &[(
+    "",
+    "HCOM_DIR: isolate per project (see 'hcom reset --help')",
+)];
 
 const RELAY_HELP: &[HelpEntry] = &[
     ("relay", "Show status and token"),
@@ -316,7 +470,10 @@ const RELAY_HELP: &[HelpEntry] = &[
     ("", "2. 'relay connect <token>' on each device"),
     ("", ""),
     ("Custom broker:", ""),
-    ("relay new --broker mqtts://host:port --password <broker-auth-secret>", ""),
+    (
+        "relay new --broker mqtts://host:port --password <broker-auth-secret>",
+        "",
+    ),
     ("relay connect <token> --password <secret>", ""),
     ("", ""),
     ("Daemon:", ""),
@@ -331,18 +488,30 @@ const TRANSCRIPT_HELP: &[HelpEntry] = &[
     ("transcript <name>", "View agent's conversation (last 10)"),
     ("transcript <name> N", "Show exchange N"),
     ("transcript <name> N-M", "Show exchanges N through M"),
-    ("transcript timeline", "User prompts across all agents by time"),
+    (
+        "transcript timeline",
+        "User prompts across all agents by time",
+    ),
     ("  --last N", "Limit to last N exchanges (default: 10)"),
     ("  --full", "Show complete assistant responses"),
     ("  --detailed", "Show tool I/O, file edits, errors"),
     ("  --json", "JSON output"),
     ("", ""),
-    ("transcript search \"pattern\"", "Search hcom-tracked transcripts (rg/grep)"),
+    (
+        "transcript search \"pattern\"",
+        "Search hcom-tracked transcripts (rg/grep)",
+    ),
     ("  --live", "Only currently alive agents"),
     ("  --all", "All transcripts (includes non-hcom sessions)"),
     ("  --limit N", "Max results (default: 20)"),
-    ("  --agent TYPE", "Filter: claude | gemini | codex | opencode"),
-    ("  --exclude-self", "Exclude the searching agent's own transcript"),
+    (
+        "  --agent TYPE",
+        "Filter: claude | gemini | codex | opencode",
+    ),
+    (
+        "  --exclude-self",
+        "Exclude the searching agent's own transcript",
+    ),
     ("  --json", "JSON output"),
     ("", ""),
     ("", "Tip: Reference ranges in messages instead of copying:"),
@@ -361,7 +530,10 @@ const ARCHIVE_HELP: &[HelpEntry] = &[
 ];
 
 const RUN_HELP: &[HelpEntry] = &[
-    ("run", "List available workflow/launch scripts and more info"),
+    (
+        "run",
+        "List available workflow/launch scripts and more info",
+    ),
     ("run <name> [args]", "Execute script"),
     ("run <name> --help", "Script options"),
     ("run docs", "CLI reference + config + script creation guide"),
@@ -374,7 +546,6 @@ const RUN_HELP: &[HelpEntry] = &[
     ("", "User scripts: ~/.hcom/scripts/"),
 ];
 
-
 const STATUS_HELP: &[HelpEntry] = &[
     ("status", "Installation status and diagnostics"),
     ("status --logs", "Include recent errors and warnings"),
@@ -384,13 +555,28 @@ const STATUS_HELP: &[HelpEntry] = &[
 const HOOKS_HELP: &[HelpEntry] = &[
     ("hooks", "Show hook status"),
     ("hooks status", "Same as above"),
-    ("hooks add [tool]", "Add hooks (claude | gemini | codex | opencode | all)"),
-    ("hooks remove [tool]", "Remove hooks (claude | gemini | codex | opencode | all)"),
+    (
+        "hooks add [tool]",
+        "Add hooks (claude | gemini | codex | opencode | all)",
+    ),
+    (
+        "hooks remove [tool]",
+        "Remove hooks (claude | gemini | codex | opencode | all)",
+    ),
     ("", ""),
-    ("", "Hooks enable automatic message delivery and status tracking."),
-    ("", "Without hooks, use ad-hoc mode (run hcom start inside any AI tool)."),
+    (
+        "",
+        "Hooks enable automatic message delivery and status tracking.",
+    ),
+    (
+        "",
+        "Without hooks, use ad-hoc mode (run hcom start inside any AI tool).",
+    ),
     ("", "Restart the tool after adding hooks to activate."),
-    ("", "Remove cleans both global (~/) and HCOM_DIR-local if set."),
+    (
+        "",
+        "Remove cleans both global (~/) and HCOM_DIR-local if set.",
+    ),
 ];
 
 const TERM_HELP: &[HelpEntry] = &[
@@ -399,7 +585,10 @@ const TERM_HELP: &[HelpEntry] = &[
     ("  --json", "Raw JSON output"),
     ("", ""),
     ("term inject <name> [text]", "Inject text into agent PTY"),
-    ("  --enter", "Append \\r (submit). Works alone or with text."),
+    (
+        "  --enter",
+        "Append \\r (submit). Works alone or with text.",
+    ),
     ("", ""),
     ("term debug on", "Enable PTY debug logging (all instances)"),
     ("term debug off", "Disable PTY debug logging"),
@@ -432,33 +621,32 @@ const CLAUDE_SPEC: ToolHelpSpec = ToolHelpSpec {
         ("hcom 3 claude -p \"prompt\"", "3 headless in background"),
         ("hcom 1 claude --agent <name>", ".claude/agents/<name>.md"),
     ],
-    extra_env: &[
-        ("HCOM_SUBAGENT_TIMEOUT", "Seconds subagents keep-alive after task"),
-    ],
+    extra_env: &[(
+        "HCOM_SUBAGENT_TIMEOUT",
+        "Seconds subagents keep-alive after task",
+    )],
     has_fork: true,
 };
 
 const GEMINI_SPEC: ToolHelpSpec = ToolHelpSpec {
     name: "gemini",
     label: "Gemini",
-    unique_examples: &[
-        ("hcom N gemini --yolo", "Flags forwarded to gemini"),
-    ],
-    extra_env: &[
-        ("HCOM_GEMINI_SYSTEM_PROMPT", "System prompt (env var)"),
-    ],
+    unique_examples: &[("hcom N gemini --yolo", "Flags forwarded to gemini")],
+    extra_env: &[("HCOM_GEMINI_SYSTEM_PROMPT", "System prompt (env var)")],
     has_fork: false,
 };
 
 const CODEX_SPEC: ToolHelpSpec = ToolHelpSpec {
     name: "codex",
     label: "Codex",
-    unique_examples: &[
-        ("hcom codex --sandbox danger-full-access", "Flags forwarded to codex"),
-    ],
-    extra_env: &[
-        ("HCOM_CODEX_SYSTEM_PROMPT", "System prompt (env var or config)"),
-    ],
+    unique_examples: &[(
+        "hcom codex --sandbox danger-full-access",
+        "Flags forwarded to codex",
+    )],
+    extra_env: &[(
+        "HCOM_CODEX_SYSTEM_PROMPT",
+        "System prompt (env var or config)",
+    )],
     has_fork: true,
 };
 
@@ -484,19 +672,24 @@ fn get_tool_spec(name: &str) -> Option<&'static ToolHelpSpec> {
 fn generate_tool_help(spec: &ToolHelpSpec) -> String {
     let t = spec.name;
     let inside_ai = crate::shared::is_inside_ai_tool();
-    let term_desc = if inside_ai { "Opens new terminal" } else { "Runs in current terminal" };
+    let term_desc = if inside_ai {
+        "Opens new terminal"
+    } else {
+        "Runs in current terminal"
+    };
     let args_env = format!("HCOM_{}_ARGS", t.to_uppercase());
 
     let mut lines: Vec<String> = Vec::new();
 
     // Usage + examples
-    lines.push(format!("Usage:"));
-    lines.push(format!("  hcom [N] {} [args...]       Launch N {} agents (default N=1)", t, spec.label));
+    lines.push("Usage:".to_string());
+    lines.push(format!(
+        "  hcom [N] {} [args...]       Launch N {} agents (default N=1)",
+        t, spec.label
+    ));
     lines.push(String::new());
     // Example block — all at same indent level using format helper
-    let ex = |usage: &str, desc: &str| -> String {
-        format!("    {:<34} {}", usage, desc)
-    };
+    let ex = |usage: &str, desc: &str| -> String { format!("    {:<34} {}", usage, desc) };
     lines.push(ex(&format!("hcom {}", t), term_desc));
     lines.push(ex(&format!("hcom 3 {}", t), "Opens 3 new terminal windows"));
     for (u, d) in spec.unique_examples {
@@ -505,19 +698,31 @@ fn generate_tool_help(spec: &ToolHelpSpec) -> String {
 
     // hcom flags
     lines.push(String::new());
-    lines.push(format!("hcom Flags:"));
-    lines.push(format!("    --tag <name>                 Group tag (names become tag-*)"));
-    lines.push(format!("    --terminal <preset>          Where new windows open"));
-    lines.push(format!("    --hcom-prompt <text>          Initial prompt"));
-    lines.push(format!("    --hcom-system-prompt <text>   System prompt"));
+    lines.push("hcom Flags:".to_string());
+    lines.push("    --tag <name>                 Group tag (names become tag-*)".to_string());
+    lines.push("    --terminal <preset>          Where new windows open".to_string());
+    lines.push("    --hcom-prompt <text>          Initial prompt".to_string());
+    lines.push("    --hcom-system-prompt <text>   System prompt".to_string());
 
     // Environment
     lines.push(String::new());
-    lines.push(format!("Environment:"));
-    lines.push(format!("    {:<28} Default args (merged with CLI)", args_env));
-    lines.push(format!("    {:<28} Group tag (agents become tag-*)", "HCOM_TAG"));
-    lines.push(format!("    {:<28} default | <preset> | \"cmd {{script}}\"", "HCOM_TERMINAL"));
-    lines.push(format!("    {:<28} Appended to messages received", "HCOM_HINTS"));
+    lines.push("Environment:".to_string());
+    lines.push(format!(
+        "    {:<28} Default args (merged with CLI)",
+        args_env
+    ));
+    lines.push(format!(
+        "    {:<28} Group tag (agents become tag-*)",
+        "HCOM_TAG"
+    ));
+    lines.push(format!(
+        "    {:<28} default | <preset> | \"cmd {{script}}\"",
+        "HCOM_TERMINAL"
+    ));
+    lines.push(format!(
+        "    {:<28} Appended to messages received",
+        "HCOM_HINTS"
+    ));
     lines.push(format!("    {:<28} One-time bootstrap notes", "HCOM_NOTES"));
     for (u, d) in spec.extra_env {
         lines.push(format!("    {:<28} {}", u.trim(), d));
@@ -526,19 +731,24 @@ fn generate_tool_help(spec: &ToolHelpSpec) -> String {
     // Resume / Fork
     lines.push(String::new());
     if spec.has_fork {
-        lines.push(format!("Resume / Fork:"));
-        lines.push(format!("    hcom r <name>                  Resume stopped agent by name"));
-        lines.push(format!("    hcom f <name>                  Fork agent session (active or stopped)"));
+        lines.push("Resume / Fork:".to_string());
+        lines.push("    hcom r <name>                  Resume stopped agent by name".to_string());
+        lines.push(
+            "    hcom f <name>                  Fork agent session (active or stopped)".to_string(),
+        );
     } else {
-        lines.push(format!("Resume:"));
-        lines.push(format!("    hcom r <name>                  Resume stopped agent by name"));
-        lines.push(format!("  {} does not support session forking (hcom f).", spec.label));
+        lines.push("Resume:".to_string());
+        lines.push("    hcom r <name>                  Resume stopped agent by name".to_string());
+        lines.push(format!(
+            "  {} does not support session forking (hcom f).",
+            spec.label
+        ));
     }
 
     // Footer
     lines.push(String::new());
     lines.push(format!("  Run \"{} --help\" for {} options.", t, t));
-    lines.push(format!("  Run \"hcom config terminal --info\" for terminal presets."));
+    lines.push("  Run \"hcom config terminal --info\" for terminal presets.".to_string());
 
     lines.join("\n")
 }
@@ -548,7 +758,11 @@ fn generate_tool_help(spec: &ToolHelpSpec) -> String {
 fn format_entry(usage: &str, desc: &str) -> String {
     if usage.is_empty() {
         // Empty usage: plain text or blank line
-        if desc.is_empty() { String::new() } else { format!("  {}", desc) }
+        if desc.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", desc)
+        }
     } else if usage.starts_with("  ") {
         // Indented: option/setting line
         format!("  {:<32} {}", usage, desc)
@@ -574,14 +788,33 @@ fn format_entries(entries: &[HelpEntry]) -> Vec<String> {
 
 /// Ordered list of all commands (for docs generation).
 pub const COMMAND_NAMES: &[&str] = &[
-    "send", "list", "events", "stop", "start", "listen", "status",
-    "config", "hooks", "archive", "reset", "transcript", "bundle",
-    "kill", "term", "relay", "run", "claude", "gemini", "codex", "opencode",
+    "send",
+    "list",
+    "events",
+    "stop",
+    "start",
+    "listen",
+    "status",
+    "config",
+    "hooks",
+    "archive",
+    "reset",
+    "transcript",
+    "bundle",
+    "kill",
+    "term",
+    "relay",
+    "run",
+    "claude",
+    "gemini",
+    "codex",
+    "opencode",
 ];
 
 /// Get the top-level help text as a String.
 pub fn get_help_text() -> String {
-    format!("hcom (hook-comms) v{} - multi-agent communication\n\
+    format!(
+        "hcom (hook-comms) v{} - multi-agent communication\n\
 \n\
 Usage:\n\
   hcom                                  TUI dashboard\n\
@@ -613,8 +846,6 @@ Commands:\n\
         env!("CARGO_PKG_VERSION"),
     )
 }
-
-/// Print main help text (hcom --help).
 
 /// Get formatted help for a single command.
 pub fn get_command_help(name: &str) -> String {
@@ -648,7 +879,9 @@ pub fn get_command_help(name: &str) -> String {
     if name == "events" || name == "events sub" {
         lines.extend(format_entries(EVENTS_HELP));
         lines.push(String::new()); // blank before filters header
-        lines.push(String::from("\nFilters (same flag repeated = OR, different flags = AND):"));
+        lines.push(String::from(
+            "\nFilters (same flag repeated = OR, different flags = AND):",
+        ));
         lines.extend(format_entries(FILTER_HELP));
         lines.extend(format_entries(EVENTS_HELP_2));
         return lines.join("\n");
@@ -660,12 +893,14 @@ pub fn get_command_help(name: &str) -> String {
         // Dynamic: resolved config file paths
         let hcom_dir = env::var("HCOM_DIR")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| {
-                dirs::home_dir().unwrap_or_default().join(".hcom")
-            });
+            .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".hcom"));
         let config_toml = hcom_dir.join("config.toml");
-        let env_file = hcom_dir.join(".env");
-        lines.push(format!("  Files: {}, {}", config_toml.display(), env_file.display()));
+        let env_file = hcom_dir.join("config.env");
+        lines.push(format!(
+            "  Files: {}, {}",
+            config_toml.display(),
+            env_file.display()
+        ));
         lines.extend(format_entries(CONFIG_HELP_2));
         return lines.join("\n");
     }
@@ -714,13 +949,35 @@ mod tests {
     #[test]
     fn all_commands_have_help() {
         let commands = [
-            "send", "list", "events", "stop", "start", "listen", "status",
-            "config", "hooks", "archive", "reset", "transcript", "bundle",
-            "kill", "term", "relay", "run", "claude", "gemini", "codex", "opencode",
+            "send",
+            "list",
+            "events",
+            "stop",
+            "start",
+            "listen",
+            "status",
+            "config",
+            "hooks",
+            "archive",
+            "reset",
+            "transcript",
+            "bundle",
+            "kill",
+            "term",
+            "relay",
+            "run",
+            "claude",
+            "gemini",
+            "codex",
+            "opencode",
         ];
         for cmd in commands {
             let help = get_command_help(cmd);
-            assert!(help.starts_with("Usage:"), "help for '{}' should start with 'Usage:'", cmd);
+            assert!(
+                help.starts_with("Usage:"),
+                "help for '{}' should start with 'Usage:'",
+                cmd
+            );
             assert!(help.len() > 20, "help for '{}' should have content", cmd);
         }
     }
@@ -734,7 +991,10 @@ mod tests {
     #[test]
     fn events_sub_resolves_to_events() {
         let help = get_command_help("events sub");
-        assert!(help.contains("Subscribe"), "events sub help should contain Subscribe section");
+        assert!(
+            help.contains("Subscribe"),
+            "events sub help should contain Subscribe section"
+        );
     }
 
     #[test]

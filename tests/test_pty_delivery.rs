@@ -21,17 +21,34 @@
 //! 3. Send second message → verify plugin-based delivery (no PTY inject)
 //! 4. Cleanup
 //!
-//! Run:
-//!     cargo test -p hcom --test test_pty_delivery -- --ignored --nocapture
-//!     cargo test -p hcom --test test_pty_delivery test_pty_claude -- --ignored --nocapture
+//! Run (must use --test-threads=1 — tests launch real agents and interfere in parallel):
+//!     cargo test -p hcom --test test_pty_delivery -- --ignored --nocapture --test-threads=1
+//!     cargo test -p hcom --test test_pty_delivery test_pty_claude -- --ignored --nocapture --test-threads=1
 
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+
+// Serial execution guard — PTY tests set env vars and spawn real agents; parallel runs interfere.
+static TEST_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_SERIAL.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
+
+/// Write to both stderr and the log file.
+macro_rules! logln {
+    ($log:expr, $($arg:tt)*) => {{
+        let _msg = format!($($arg)*);
+        eprintln!("{}", _msg);
+        $log.log(&_msg);
+    }};
+}
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -84,7 +101,14 @@ fn require_ready(tool: &str) -> bool {
     }
 }
 
-const SCREEN_FIELDS: &[&str] = &["lines", "size", "cursor", "ready", "prompt_empty", "input_text"];
+const SCREEN_FIELDS: &[&str] = &[
+    "lines",
+    "size",
+    "cursor",
+    "ready",
+    "prompt_empty",
+    "input_text",
+];
 const SENDER: &str = "ptytest";
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -121,7 +145,9 @@ fn get_screen(name: &str) -> Option<serde_json::Value> {
 
 fn get_events(instance: &str, last: u32, full: bool) -> Vec<serde_json::Value> {
     let full_flag = if full { " --full" } else { "" };
-    let out = hcom(&format!("events --agent {instance} --last {last}{full_flag}"));
+    let out = hcom(&format!(
+        "events --agent {instance} --last {last}{full_flag}"
+    ));
     if !out.status.success() {
         return vec![];
     }
@@ -176,6 +202,7 @@ impl Drop for InstanceGuard {
 struct TestLog {
     timestamped: PathBuf,
     latest: PathBuf,
+    start: Instant,
 }
 
 impl TestLog {
@@ -195,9 +222,23 @@ impl TestLog {
             .unwrap()
             .join(format!("test_pty_delivery_{tool}.latest.log"));
 
-        // Clear latest for fresh run
-        fs::write(&latest, "").ok();
-        TestLog { timestamped, latest }
+        let start = Instant::now();
+        let header = format!(
+            "[{}] PTY delivery test: {tool}\nlog: {}\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            timestamped.display(),
+        );
+        // Write header immediately — so log is non-empty even if test panics early.
+        for path in [&timestamped, &latest] {
+            let _ = fs::write(path, &header);
+        }
+        eprintln!("{header}");
+
+        TestLog {
+            timestamped,
+            latest,
+            start,
+        }
     }
 
     fn log(&self, text: &str) {
@@ -224,10 +265,27 @@ impl TestLog {
     }
 }
 
+impl Drop for TestLog {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let elapsed = self.start.elapsed();
+            self.log(&format!("\n[{elapsed:.1?}] TEST FAILED (panicked above)"));
+        } else {
+            let elapsed = self.start.elapsed();
+            self.log(&format!("\n[{elapsed:.1?}] TEST COMPLETE"));
+        }
+    }
+}
+
 // ── Validation ─────────────────────────────────────────────────────────
 
 fn validate_screen_schema(screen: &serde_json::Value) {
-    let keys: HashSet<&str> = screen.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+    let keys: HashSet<&str> = screen
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
     for field in SCREEN_FIELDS {
         assert!(keys.contains(field), "Screen JSON missing field: {field}");
     }
@@ -237,7 +295,10 @@ fn validate_screen_schema(screen: &serde_json::Value) {
     let cursor = screen["cursor"].as_array().unwrap();
     assert_eq!(cursor.len(), 2, "cursor should be [r,c]");
     assert!(screen["ready"].is_boolean(), "ready should be bool");
-    assert!(screen["prompt_empty"].is_boolean(), "prompt_empty should be bool");
+    assert!(
+        screen["prompt_empty"].is_boolean(),
+        "prompt_empty should be bool"
+    );
     assert!(
         screen["input_text"].is_null() || screen["input_text"].is_string(),
         "input_text should be str or null"
@@ -300,12 +361,7 @@ fn validate_tool_ui_elements(screen: &serde_json::Value, tool: &str) {
     }
 }
 
-fn validate_delivery_events(
-    instance: &str,
-    baseline_id: i64,
-    sender: &str,
-    log: &TestLog,
-) {
+fn validate_delivery_events(instance: &str, baseline_id: i64, sender: &str, log: &TestLog) {
     let events = get_events(instance, 30, true);
     let delivery = events.iter().find(|ev| {
         ev["id"].as_i64().unwrap_or(0) > baseline_id
@@ -321,9 +377,13 @@ fn validate_delivery_events(
         "Delivery event: {}",
         serde_json::to_string_pretty(delivery).unwrap()
     ));
-    eprintln!(
+    logln!(
+        log,
         "  Delivery event: id={} context={} position={} msg_ts={}",
-        delivery["id"], data["context"], data["position"], data["msg_ts"]
+        delivery["id"],
+        data["context"],
+        data["position"],
+        data["msg_ts"]
     );
 
     let ctx = data["context"].as_str().unwrap_or("");
@@ -331,17 +391,17 @@ fn validate_delivery_events(
         ctx.contains(sender),
         "Delivery context '{ctx}' doesn't reference sender '{sender}'"
     );
-    eprintln!("  OK: Delivery event references sender '{sender}'");
+    logln!(log, "  OK: Delivery event references sender '{sender}'");
 
     let pos = data["position"].as_i64().unwrap_or(0);
     assert!(
         pos > baseline_id,
         "Delivery position {pos} not after baseline {baseline_id}"
     );
-    eprintln!("  OK: Delivery position {pos} > baseline {baseline_id}");
+    logln!(log, "  OK: Delivery position {pos} > baseline {baseline_id}");
 }
 
-fn validate_gate_block(instance: &str, tool: &str, after_id: i64) {
+fn validate_gate_block(instance: &str, tool: &str, after_id: i64, log: &TestLog) {
     let expected = gate_block_context(tool);
     let events = get_events(instance, 20, false);
 
@@ -356,30 +416,39 @@ fn validate_gate_block(instance: &str, tool: &str, after_id: i64) {
     if let Some(ev) = gate_event {
         let ctx = ev["data"]["context"].as_str().unwrap_or("");
         let detail = ev["data"]["detail"].as_str().unwrap_or("");
-        eprintln!("  Gate block event: id={} context={ctx} detail={detail:?}", ev["id"]);
+        logln!(
+            log,
+            "  Gate block event: id={} context={ctx} detail={detail:?}",
+            ev["id"]
+        );
         if ctx == expected {
-            eprintln!("  OK: Gate blocked with expected context '{expected}'");
+            logln!(log, "  OK: Gate blocked with expected context '{expected}'");
         } else {
-            eprintln!("  WARN: Expected gate context '{expected}', got '{ctx}'");
+            logln!(log, "  WARN: Expected gate context '{expected}', got '{ctx}'");
         }
     } else {
-        eprintln!("  INFO: No gate block event found (may already have been in blocked state)");
+        logln!(
+            log,
+            "  INFO: No gate block event found (may already have been in blocked state)"
+        );
     }
 }
 
 // ── Main test flow (claude/gemini/codex) ───────────────────────────────
 
 fn run_pty_test(tool: &str) {
-    // SAFETY: Integration tests run sequentially (#[ignore] + manual invocation).
+    let _serial = serial_lock();
+
+    // SAFETY: Integration tests run serially (serial_lock above).
     unsafe {
         std::env::set_var("HCOM_TERMINAL", "tmux");
         std::env::set_var("HCOM_TAG", "ptytest");
     }
     let log = TestLog::new(tool);
 
-    eprintln!("{}", "=".repeat(60));
-    eprintln!("PTY Delivery Test: {tool}");
-    eprintln!("{}", "=".repeat(60));
+    logln!(log, "{}", "=".repeat(60));
+    logln!(log, "PTY Delivery Test: {tool}");
+    logln!(log, "{}", "=".repeat(60));
 
     // Record last event ID before launch
     let pre_launch_id = {
@@ -397,7 +466,7 @@ fn run_pty_test(tool: &str) {
     };
 
     // ── Phase 1: Launch ──────────────────────────────────────────
-    eprintln!("\n[Phase 1] Launching {tool} in tmux...");
+    logln!(log, "\n[Phase 1] Launching {tool} in tmux...");
     let t0 = Instant::now();
 
     let model_flag = match tool {
@@ -412,7 +481,7 @@ fn run_pty_test(tool: &str) {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    eprintln!("  Waiting for ready event...");
+    logln!(log, "  Waiting for ready event...");
 
     let mut guard = InstanceGuard { base_name: None };
 
@@ -452,7 +521,10 @@ fn run_pty_test(tool: &str) {
     };
 
     let t_ready = t0.elapsed();
-    eprintln!("  OK: Instance launched: {instance_name} (base: {base_name}, ready in {t_ready:.1?})");
+    logln!(
+        log,
+        "  OK: Instance launched: {instance_name} (base: {base_name}, ready in {t_ready:.1?})"
+    );
 
     // Wait for screen to be ready
     let screen: serde_json::Value = poll_until(
@@ -470,30 +542,32 @@ fn run_pty_test(tool: &str) {
     );
 
     // ── Validate initial screen ──────────────────────────────────
-    eprintln!("\n[Validate] Initial screen state for {tool}...");
+    logln!(log, "\n[Validate] Initial screen state for {tool}...");
     validate_screen_schema(&screen);
-    eprintln!("  OK: Schema valid");
+    logln!(log, "  OK: Schema valid");
     validate_ready_pattern(&screen, tool);
-    eprintln!("  OK: Ready pattern '{}' consistent", ready_pattern(tool));
+    logln!(log, "  OK: Ready pattern '{}' consistent", ready_pattern(tool));
     assert_eq!(screen["ready"].as_bool(), Some(true));
     validate_prompt_consistency(&screen);
-    eprintln!(
+    logln!(
+        log,
         "  OK: prompt_empty={} input_text={:?}",
-        screen["prompt_empty"], screen["input_text"]
+        screen["prompt_empty"],
+        screen["input_text"]
     );
     validate_tool_ui_elements(&screen, tool);
     assert_eq!(screen["prompt_empty"].as_bool(), Some(true));
     log.log_screen(&screen, &format!("{tool} — initial (prompt empty)"));
 
     // ── Phase 2: Delivery succeeds on clean prompt ───────────────
-    eprintln!("\n[Phase 2] Testing delivery on clean prompt...");
+    logln!(log, "\n[Phase 2] Testing delivery on clean prompt...");
 
     let baseline_event = get_last_event_id(&base_name);
-    eprintln!("  OK: Baseline event ID: {baseline_event}");
+    logln!(log, "  OK: Baseline event ID: {baseline_event}");
 
     let t1 = Instant::now();
     send_msg(&format!("@{instance_name} delivery-test-1 do not reply"));
-    eprintln!("  OK: Message sent");
+    logln!(log, "  OK: Message sent");
 
     // Wait for delivery event
     let delivery_event: serde_json::Value = poll_until(
@@ -513,7 +587,10 @@ fn run_pty_test(tool: &str) {
     );
     let t_delivery = t1.elapsed();
     let new_event = delivery_event["id"].as_i64().unwrap_or(0);
-    eprintln!("  OK: Cursor advanced: {baseline_event} -> {new_event} (delivery in {t_delivery:.1?})");
+    logln!(
+        log,
+        "  OK: Cursor advanced: {baseline_event} -> {new_event} (delivery in {t_delivery:.1?})"
+    );
 
     // Wait for screen to settle
     poll_until(
@@ -544,7 +621,10 @@ fn run_pty_test(tool: &str) {
     log.log_screen(&screen, &format!("{tool} — post-delivery"));
 
     // ── Phase 3: Delivery blocked by uncommitted text ────────────
-    eprintln!("\n[Phase 3] Testing delivery blocked by uncommitted text...");
+    logln!(
+        log,
+        "\n[Phase 3] Testing delivery blocked by uncommitted text..."
+    );
 
     poll_until(
         || {
@@ -565,7 +645,7 @@ fn run_pty_test(tool: &str) {
     thread::sleep(Duration::from_secs(2));
 
     hcom_check(&format!("term inject {base_name} uncommitted text here"));
-    eprintln!("  OK: Injected uncommitted text");
+    logln!(log, "  OK: Injected uncommitted text");
 
     // Verify text appears in input box
     let screen: serde_json::Value = poll_until(
@@ -596,18 +676,21 @@ fn run_pty_test(tool: &str) {
     );
     validate_prompt_consistency(&screen);
     validate_ready_pattern(&screen, tool);
-    eprintln!("  OK: Input text detected: {input_text:?}");
-    log.log_screen(&screen, &format!("{tool} — after inject (uncommitted text)"));
+    logln!(log, "  OK: Input text detected: {input_text:?}");
+    log.log_screen(
+        &screen,
+        &format!("{tool} — after inject (uncommitted text)"),
+    );
 
     let baseline_event2 = get_last_event_id(&base_name);
 
     send_msg(&format!(
         "@{instance_name} delivery-test-2-should-block do not reply"
     ));
-    eprintln!("  OK: Message sent (should be blocked)");
+    logln!(log, "  OK: Message sent (should be blocked)");
 
     // Wait and verify delivery does NOT happen
-    eprintln!("  Waiting 8s to confirm no delivery...");
+    logln!(log, "  Waiting 8s to confirm no delivery...");
     thread::sleep(Duration::from_secs(8));
 
     let screen = get_screen(&base_name).unwrap();
@@ -617,7 +700,7 @@ fn run_pty_test(tool: &str) {
         text.contains("uncommitted"),
         "Uncommitted text was clobbered! input_text={text:?}"
     );
-    eprintln!("  OK: Uncommitted text preserved: {text:?}");
+    logln!(log, "  OK: Uncommitted text preserved: {text:?}");
     validate_prompt_consistency(&screen);
 
     // Verify no delivery event during gate block
@@ -637,18 +720,21 @@ fn run_pty_test(tool: &str) {
         "Unexpected delivery during gate block: {:?}",
         delivery_during_block.first()
     );
-    eprintln!("  OK: No delivery event during gate block");
+    logln!(log, "  OK: No delivery event during gate block");
 
-    validate_gate_block(&base_name, tool, baseline_event2);
+    validate_gate_block(&base_name, tool, baseline_event2, &log);
     log.log_screen(&screen, &format!("{tool} — gate blocked (text preserved)"));
 
     // ── Phase 4: Submit uncommitted text, unblock delivery ────────
-    eprintln!("\n[Phase 4] Submitting uncommitted text, waiting for blocked message delivery...");
+    logln!(
+        log,
+        "\n[Phase 4] Submitting uncommitted text, waiting for blocked message delivery..."
+    );
 
     let baseline_event3 = get_last_event_id(&base_name);
 
     hcom_check(&format!("term inject {base_name} --enter"));
-    eprintln!("  OK: Sent --enter to submit uncommitted text");
+    logln!(log, "  OK: Sent --enter to submit uncommitted text");
 
     // Wait for screen to settle
     poll_until(
@@ -683,9 +769,11 @@ fn run_pty_test(tool: &str) {
         Duration::from_secs(60),
         Duration::from_secs(1),
     );
-    eprintln!(
+    logln!(
+        log,
         "  OK: Blocked message delivered: id={} context={}",
-        delivery3["id"], delivery3["data"]["context"]
+        delivery3["id"],
+        delivery3["data"]["context"]
     );
     log.log(&format!(
         "Phase 4 delivery event: {}",
@@ -699,7 +787,10 @@ fn run_pty_test(tool: &str) {
         validate_ready_pattern(&screen, tool);
     }
     validate_prompt_consistency(&screen);
-    log.log_screen(&screen, &format!("{tool} — after blocked message delivered"));
+    log.log_screen(
+        &screen,
+        &format!("{tool} — after blocked message delivered"),
+    );
 
     // Log all events for reference
     let all_events = get_events(&base_name, 50, false);
@@ -709,26 +800,28 @@ fn run_pty_test(tool: &str) {
     }
 
     // Cleanup handled by guard Drop
-    eprintln!("\n{}", "=".repeat(60));
-    eprintln!("{} — ALL PHASES PASSED", tool.to_uppercase());
-    eprintln!("  Log: {}", log.timestamped.display());
-    eprintln!("{}", "=".repeat(60));
+    logln!(log, "\n{}", "=".repeat(60));
+    logln!(log, "{} — ALL PHASES PASSED", tool.to_uppercase());
+    logln!(log, "  Log: {}", log.timestamped.display());
+    logln!(log, "{}", "=".repeat(60));
 }
 
 // ── OpenCode test flow ─────────────────────────────────────────────────
 
 fn run_pty_test_opencode() {
+    let _serial = serial_lock();
+
     let tool = "opencode";
-    // SAFETY: Integration tests run sequentially (#[ignore] + manual invocation).
+    // SAFETY: Integration tests run serially (serial_lock above).
     unsafe {
         std::env::set_var("HCOM_TERMINAL", "tmux");
         std::env::set_var("HCOM_TAG", "ptytest");
     }
     let log = TestLog::new(tool);
 
-    eprintln!("{}", "=".repeat(60));
-    eprintln!("PTY Delivery Test: {tool} (bootstrap injection)");
-    eprintln!("{}", "=".repeat(60));
+    logln!(log, "{}", "=".repeat(60));
+    logln!(log, "PTY Delivery Test: {tool} (bootstrap injection)");
+    logln!(log, "{}", "=".repeat(60));
 
     let pre_launch_id = {
         let out = hcom("events --last 1");
@@ -745,7 +838,7 @@ fn run_pty_test_opencode() {
     };
 
     // ── Phase 1: Launch ──────────────────────────────────────────
-    eprintln!("\n[Phase 1] Launching {tool} in tmux...");
+    logln!(log, "\n[Phase 1] Launching {tool} in tmux...");
     let t0 = Instant::now();
 
     let out = hcom(&format!("--go 1 {tool}"));
@@ -755,7 +848,7 @@ fn run_pty_test_opencode() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    eprintln!("  Waiting for ready event...");
+    logln!(log, "  Waiting for ready event...");
     let mut guard = InstanceGuard { base_name: None };
 
     let base_name: String = poll_until(
@@ -794,7 +887,10 @@ fn run_pty_test_opencode() {
     };
 
     let t_ready = t0.elapsed();
-    eprintln!("  OK: Instance launched: {instance_name} (base: {base_name}, ready in {t_ready:.1?})");
+    logln!(
+        log,
+        "  OK: Instance launched: {instance_name} (base: {base_name}, ready in {t_ready:.1?})"
+    );
 
     // Wait for screen ready
     let screen: serde_json::Value = poll_until(
@@ -811,30 +907,41 @@ fn run_pty_test_opencode() {
         Duration::from_secs(1),
     );
 
-    eprintln!("\n[Validate] Initial screen state for {tool}...");
+    logln!(log, "\n[Validate] Initial screen state for {tool}...");
     validate_screen_schema(&screen);
-    eprintln!("  OK: Schema valid");
-    assert_eq!(screen["ready"].as_bool(), Some(true), "OpenCode should be ready after poll");
-    eprintln!("  OK: ready=true");
+    logln!(log, "  OK: Schema valid");
+    assert_eq!(
+        screen["ready"].as_bool(),
+        Some(true),
+        "OpenCode should be ready after poll"
+    );
+    logln!(log, "  OK: ready=true");
     validate_ready_pattern(&screen, tool);
-    eprintln!("  OK: Ready pattern '{}' consistent", ready_pattern(tool));
+    logln!(
+        log,
+        "  OK: Ready pattern '{}' consistent",
+        ready_pattern(tool)
+    );
     assert!(
         screen["input_text"].is_null(),
         "OpenCode input_text should be null, got {:?}",
         screen["input_text"]
     );
-    eprintln!("  OK: input_text=null (no input detection)");
+    logln!(log, "  OK: input_text=null (no input detection)");
     log.log_screen(&screen, &format!("{tool} — initial"));
 
     // ── Phase 2: Bootstrap injection (first message via PTY) ─────
-    eprintln!("\n[Phase 2] Testing bootstrap injection (first message via PTY)...");
+    logln!(
+        log,
+        "\n[Phase 2] Testing bootstrap injection (first message via PTY)..."
+    );
 
     let baseline_event = get_last_event_id(&base_name);
-    eprintln!("  OK: Baseline event ID: {baseline_event}");
+    logln!(log, "  OK: Baseline event ID: {baseline_event}");
 
     let t1 = Instant::now();
     send_msg(&format!("@{instance_name} bootstrap-test-1 do not reply"));
-    eprintln!("  OK: Message sent");
+    logln!(log, "  OK: Message sent");
 
     // Wait for agent to go active
     let active_event: serde_json::Value = poll_until(
@@ -851,7 +958,7 @@ fn run_pty_test_opencode() {
         Duration::from_secs(1),
     );
     let active_id = active_event["id"].as_i64().unwrap_or(0);
-    eprintln!("  OK: Agent went active: event={active_id}");
+    logln!(log, "  OK: Agent went active: event={active_id}");
 
     // Wait for listening after active
     let listening_event: serde_json::Value = poll_until(
@@ -868,22 +975,25 @@ fn run_pty_test_opencode() {
         Duration::from_secs(1),
     );
     let t_delivery = t1.elapsed();
-    eprintln!("  OK: Bootstrap delivery complete: active→listening in {t_delivery:.1?}");
+    logln!(
+        log,
+        "  OK: Bootstrap delivery complete: active→listening in {t_delivery:.1?}"
+    );
     log.log(&format!(
         "Bootstrap: active={} listening={}",
-        active_id,
-        listening_event["id"]
+        active_id, listening_event["id"]
     ));
 
     // Check hcom.log for bootstrap_inject (non-fatal)
-    let log_path = dirs::home_dir()
-        .unwrap()
-        .join(".hcom/.tmp/logs/hcom.log");
+    let log_path = dirs::home_dir().unwrap().join(".hcom/.tmp/logs/hcom.log");
     if let Ok(content) = fs::read_to_string(&log_path) {
         if content.contains("delivery.bootstrap_inject") && content.contains(&base_name) {
-            eprintln!("  OK: Bootstrap inject confirmed in hcom.log");
+            logln!(log, "  OK: Bootstrap inject confirmed in hcom.log");
         } else {
-            eprintln!("  WARN: delivery.bootstrap_inject not found in hcom.log (may have rotated)");
+            logln!(
+                log,
+                "  WARN: delivery.bootstrap_inject not found in hcom.log (may have rotated)"
+            );
         }
     }
 
@@ -894,14 +1004,14 @@ fn run_pty_test_opencode() {
     }
 
     // ── Phase 3: Plugin delivery (second message) ────────────────
-    eprintln!("\n[Phase 3] Testing plugin delivery (second message)...");
+    logln!(log, "\n[Phase 3] Testing plugin delivery (second message)...");
 
     let baseline_event2 = get_last_event_id(&base_name);
     thread::sleep(Duration::from_secs(2));
 
     let t2 = Instant::now();
     send_msg(&format!("@{instance_name} plugin-test-2 do not reply"));
-    eprintln!("  OK: Second message sent");
+    logln!(log, "  OK: Second message sent");
 
     let active2: serde_json::Value = poll_until(
         || {
@@ -917,7 +1027,10 @@ fn run_pty_test_opencode() {
         Duration::from_secs(1),
     );
     let active2_id = active2["id"].as_i64().unwrap_or(0);
-    eprintln!("  OK: Agent went active for second message: event={active2_id}");
+    logln!(
+        log,
+        "  OK: Agent went active for second message: event={active2_id}"
+    );
 
     poll_until(
         || {
@@ -933,7 +1046,10 @@ fn run_pty_test_opencode() {
         Duration::from_secs(1),
     );
     let t_plugin = t2.elapsed();
-    eprintln!("  OK: Plugin delivery complete: active→listening in {t_plugin:.1?}");
+    logln!(
+        log,
+        "  OK: Plugin delivery complete: active→listening in {t_plugin:.1?}"
+    );
 
     let screen = get_screen(&base_name);
     if let Some(s) = &screen {
@@ -949,10 +1065,10 @@ fn run_pty_test_opencode() {
     }
 
     // Cleanup handled by guard Drop
-    eprintln!("\n{}", "=".repeat(60));
-    eprintln!("{} — ALL PHASES PASSED", tool.to_uppercase());
-    eprintln!("  Log: {}", log.timestamped.display());
-    eprintln!("{}", "=".repeat(60));
+    logln!(log, "\n{}", "=".repeat(60));
+    logln!(log, "{} — ALL PHASES PASSED", tool.to_uppercase());
+    logln!(log, "  Log: {}", log.timestamped.display());
+    logln!(log, "{}", "=".repeat(60));
 }
 
 // ── Test entries ───────────────────────────────────────────────────────

@@ -1,14 +1,6 @@
-//! Message operations — filtering, routing, delivery, and formatting.
-//!
-//! - @mention parsing with canonical regex
-//! - `compute_scope` with 3-priority target matching
-//! - `format_messages_json` for hook delivery output
-//! - Request-watch subscription create/cancel lifecycle
-//! - `get_read_receipts` (local deliver-event vs remote timestamp)
-//! - Message validation and bash unescape
-//! - Scope-based delivery filtering
+//! Message operations — routing, scope computation, and delivery formatting.
 
-use crate::shared::{extract_mentions, SENDER, MAX_MESSAGE_SIZE};
+use crate::shared::{MAX_MESSAGE_SIZE, SENDER, extract_mentions};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -17,8 +9,6 @@ use std::sync::LazyLock;
 /// Precompiled regex for @[hcom-*] system notification mentions.
 static SYSTEM_BRACKET_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"@\[hcom-[a-z]+\]").unwrap());
-
-// ==================== Type Definitions ====================
 
 /// Message scope: broadcast (everyone) or mentions (targeted).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,12 +24,16 @@ impl MessageScope {
             MessageScope::Mentions => "mentions",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for MessageScope {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "broadcast" => Some(MessageScope::Broadcast),
-            "mentions" => Some(MessageScope::Mentions),
-            _ => None,
+            "broadcast" => Ok(MessageScope::Broadcast),
+            "mentions" => Ok(MessageScope::Mentions),
+            _ => Err(format!("invalid message scope: {s}")),
         }
     }
 }
@@ -60,13 +54,17 @@ impl MessageIntent {
             MessageIntent::Ack => "ack",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for MessageIntent {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "request" => Some(MessageIntent::Request),
-            "inform" => Some(MessageIntent::Inform),
-            "ack" => Some(MessageIntent::Ack),
-            _ => None,
+            "request" => Ok(MessageIntent::Request),
+            "inform" => Ok(MessageIntent::Inform),
+            "ack" => Ok(MessageIntent::Ack),
+            _ => Err(format!("invalid message intent: {s}")),
         }
     }
 }
@@ -122,16 +120,13 @@ impl InstanceInfo {
     }
 }
 
-// ==================== Validation ====================
-
 // validate_scope and validate_intent live in core::helpers — re-export for consumers.
-pub use crate::core::helpers::{validate_scope, validate_intent};
+pub use crate::core::helpers::{validate_intent, validate_scope};
 
 /// Validate message content and size.
-/// Returns Some(error_message) if invalid, None if valid.
-pub fn validate_message(message: &str) -> Option<String> {
+pub fn validate_message(message: &str) -> Result<(), String> {
     if message.is_empty() || message.trim().is_empty() {
-        return Some("Message required".to_string());
+        return Err("Message required".to_string());
     }
 
     // Reject control characters (except \n, \r, \t)
@@ -141,18 +136,19 @@ pub fn validate_message(message: &str) -> Option<String> {
             || ('\x0E'..='\x1F').contains(&ch)
             || ('\u{0080}'..='\u{009F}').contains(&ch)
         {
-            return Some("Message contains control characters".to_string());
+            return Err("Message contains control characters".to_string());
         }
     }
 
     if message.len() > MAX_MESSAGE_SIZE {
-        return Some(format!("Message too large (max {} chars)", MAX_MESSAGE_SIZE));
+        return Err(format!(
+            "Message too large (max {} chars)",
+            MAX_MESSAGE_SIZE
+        ));
     }
 
-    None
+    Ok(())
 }
-
-// ==================== Formatting Helpers ====================
 
 /// Format recipients list for display.
 ///
@@ -163,15 +159,16 @@ pub fn format_recipients(delivered_to: &[String], max_show: usize) -> String {
     }
 
     if delivered_to.len() > max_show {
-        let shown: Vec<&str> = delivered_to[..max_show].iter().map(|s| s.as_str()).collect();
+        let shown: Vec<&str> = delivered_to[..max_show]
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         let remaining = delivered_to.len() - max_show;
         format!("{} (+{} more)", shown.join(", "), remaining)
     } else {
         delivered_to.join(", ")
     }
 }
-
-// ==================== Scope Computation ====================
 
 /// Match a target against instance names with base-name fallback.
 ///
@@ -211,8 +208,7 @@ fn match_target(
         .filter(|fn_| {
             !fn_.contains(':')
                 && fn_.to_lowercase().starts_with(&target_lower)
-                && (fn_.len() == target.len()
-                    || fn_.as_bytes().get(target.len()) != Some(&b'_'))
+                && (fn_.len() == target.len() || fn_.as_bytes().get(target.len()) != Some(&b'_'))
         })
         .filter_map(|fn_| full_to_base.get(fn_.as_str()).cloned())
         .collect();
@@ -285,10 +281,7 @@ pub fn compute_scope(
             }
 
             if !unmatched.is_empty() {
-                let display = format_recipients(
-                    &full_names,
-                    30,
-                );
+                let display = format_recipients(&full_names, 30);
                 let unmatched_display: Vec<String> =
                     unmatched.iter().map(|t| format!("@{}", t)).collect();
                 return Err(format!(
@@ -369,10 +362,7 @@ pub fn compute_scope(
                     ));
                 }
 
-                let display = format_recipients(
-                    &full_names,
-                    30,
-                );
+                let display = format_recipients(&full_names, 30);
                 let unmatched_display: Vec<String> =
                     unmatched.iter().map(|m| format!("@{}", m)).collect();
                 return Err(format!(
@@ -409,8 +399,6 @@ fn dedup_preserving_order(items: &[String]) -> Vec<String> {
     result
 }
 
-// ==================== Message Filtering ====================
-
 /// Check if message should be delivered based on scope.
 ///
 /// Returns true if receiver should get the message.
@@ -436,11 +424,7 @@ pub fn should_deliver_message(
             let mentions = event_data
                 .get("mentions")
                 .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                })
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
                 .unwrap_or_default();
 
             // Strip device suffix for cross-device matching
@@ -452,8 +436,6 @@ pub fn should_deliver_message(
         _ => Ok(false),
     }
 }
-
-// ==================== Message Formatting ====================
 
 /// Build message prefix from envelope fields.
 ///
@@ -469,7 +451,9 @@ fn build_message_prefix(msg: &Value) -> String {
     let id_ref = if let Some(relay) = relay {
         let short = relay.get("short").and_then(|v| v.as_str()).unwrap_or("");
         let rid = relay.get("id");
-        if !short.is_empty() && let Some(rid_val) = rid {
+        if !short.is_empty()
+            && let Some(rid_val) = rid
+        {
             let rid_str = match rid_val {
                 Value::Number(n) => n.to_string(),
                 Value::String(s) => s.clone(),
@@ -511,6 +495,7 @@ fn build_message_prefix(msg: &Value) -> String {
 /// `get_instance_data`: callback to get instance data by name (for tag lookup).
 /// `get_config_hints`: callback to get config hints.
 /// `tip_checker`: optional callback for tip system (has_seen, mark_seen).
+#[allow(clippy::type_complexity)]
 pub fn format_hook_messages(
     messages: &[Value],
     instance_name: &str,
@@ -543,10 +528,7 @@ pub fn format_hook_messages(
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
         let sender_display = get_sender_display(sender_name);
-        let text = msg
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let text = msg.get("message").and_then(|v| v.as_str()).unwrap_or("");
         format!("{} {} → {}: {}", prefix, sender_display, recipient, text)
     } else {
         let parts: Vec<String> = messages
@@ -564,10 +546,7 @@ pub fn format_hook_messages(
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 let sender_display = get_sender_display(sender_name);
-                let text = msg
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let text = msg.get("message").and_then(|v| v.as_str()).unwrap_or("");
                 format!("{} {} → {}: {}", prefix, sender_display, recipient, text)
             })
             .collect();
@@ -614,6 +593,7 @@ pub fn format_hook_messages(
 }
 
 /// Format messages for model injection — wraps in <hcom> tags.
+#[allow(clippy::type_complexity)]
 pub fn format_messages_json(
     messages: &[Value],
     instance_name: &str,
@@ -633,10 +613,7 @@ pub fn format_messages_json(
 
 /// Get full name from instance data Value.
 fn get_full_name_from_value(data: &Value) -> String {
-    let name = data
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let tag = data.get("tag").and_then(|v| v.as_str()).unwrap_or("");
     if !tag.is_empty() {
         format!("{}-{}", tag, name)
@@ -672,8 +649,6 @@ fn get_tip_text(tip_key: &str) -> Option<&'static str> {
     crate::core::tips::get_tip(tip_key)
 }
 
-// ==================== Bash Unescape ====================
-
 /// Remove bash escape sequences from message content.
 ///
 /// Bash escapes special characters when constructing commands. Since hcom
@@ -689,8 +664,6 @@ pub fn unescape_bash(text: &str) -> String {
         .replace("\\\"", "\"")
         .replace("\\'", "'")
 }
-
-// ==================== Request-Watch Subscriptions ====================
 
 /// Create request-watch subscription data for a single recipient.
 ///
@@ -725,23 +698,32 @@ pub fn build_request_watch_sub(
     (sub_key, sub_value.to_string())
 }
 
-// ==================== Read Receipts ====================
-
 /// Check if instance data represents an external sender.
 ///
 /// External senders have empty/null session_id, no parent_session_id,
 /// and no origin_device_id.
 fn is_external_sender_data(data: &Value) -> bool {
     // Remote instances are not external
-    if data.get("origin_device_id").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
+    if data
+        .get("origin_device_id")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+    {
         return false;
     }
     // Subagents have parent_session_id, so are not external
-    if data.get("parent_session_id").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
+    if data
+        .get("parent_session_id")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+    {
         return false;
     }
     // External = no session_id
-    let session_id = data.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+    let session_id = data
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     session_id.is_empty()
 }
 
@@ -757,6 +739,7 @@ fn is_external_sender_data(data: &Value) -> bool {
 /// * `remote_msg_ts` - For remote instances: {name: latest msg_ts}
 /// * `max_text_length` - Max text length before truncation
 /// * `format_age_fn` - Function to format seconds as age string
+#[allow(clippy::too_many_arguments)]
 pub fn compute_read_receipts(
     sent_messages: &[(i64, String, Value)],
     active_instances: &HashMap<String, Value>,
@@ -784,10 +767,7 @@ pub fn compute_read_receipts(
             None => continue,
         };
 
-        let msg_text = msg_data
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let msg_text = msg_data.get("text").and_then(|v| v.as_str()).unwrap_or("");
 
         let delivered_instances = deliver_events_by_msg
             .get(msg_id)
@@ -800,7 +780,11 @@ pub fn compute_read_receipts(
 
             // Remote instance: compare msg_ts (timestamp-based)
             if let Some(data) = inst_data {
-                if data.get("origin_device_id").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
+                if data
+                    .get("origin_device_id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty())
+                {
                     if let Some(ts) = remote_msg_ts.get(inst_name) {
                         if ts >= msg_timestamp {
                             read_by.push(inst_name.clone());
@@ -834,7 +818,10 @@ pub fn compute_read_receipts(
                 .unwrap_or_else(|| "?".to_string());
 
             let truncated_text = if msg_text.len() > max_text_length {
-                format!("{}...", crate::delivery::truncate_chars(msg_text, max_text_length.saturating_sub(3)))
+                format!(
+                    "{}...",
+                    crate::delivery::truncate_chars(msg_text, max_text_length.saturating_sub(3))
+                )
             } else {
                 msg_text.to_string()
             };
@@ -851,8 +838,6 @@ pub fn compute_read_receipts(
 
     receipts
 }
-
-// ==================== PTY Message Preview ====================
 
 /// Max length for message preview in PTY trigger.
 pub const PREVIEW_MAX_LEN: usize = 60;
@@ -907,8 +892,6 @@ pub fn build_message_preview(formatted: &str, max_len: usize) -> String {
     format!("{}{}{}", wrapper_open, formatted, wrapper_close)
 }
 
-// ==================== is_mentioned ====================
-
 /// Check if instance is @-mentioned in text using prefix matching on full name.
 ///
 /// Uses same prefix matching logic as compute_scope() for consistency.
@@ -923,14 +906,19 @@ pub fn is_mentioned(text: &str, name: &str, tag: Option<&str>) -> bool {
     for mention in &mentions {
         if mention.contains(':') {
             // Remote mention — match any instance with prefix
-            if full_name.to_lowercase().starts_with(&mention.to_lowercase()) {
+            if full_name
+                .to_lowercase()
+                .starts_with(&mention.to_lowercase())
+            {
                 return true;
             }
         } else {
             // Bare mention — only match local instances (no : in full name)
             // Don't match across underscore boundary
             if !full_name.contains(':')
-                && full_name.to_lowercase().starts_with(&mention.to_lowercase())
+                && full_name
+                    .to_lowercase()
+                    .starts_with(&mention.to_lowercase())
                 && (full_name.len() == mention.len()
                     || full_name.as_bytes().get(mention.len()) != Some(&b'_'))
             {
@@ -950,8 +938,6 @@ pub fn is_mentioned(text: &str, name: &str, tag: Option<&str>) -> bool {
     false
 }
 
-// ==================== Tests ====================
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -960,29 +946,26 @@ mod tests {
 
     #[test]
     fn test_validate_message_empty() {
-        assert_eq!(validate_message(""), Some("Message required".to_string()));
-        assert_eq!(
-            validate_message("   "),
-            Some("Message required".to_string())
-        );
+        assert_eq!(validate_message(""), Err("Message required".to_string()));
+        assert_eq!(validate_message("   "), Err("Message required".to_string()));
     }
 
     #[test]
     fn test_validate_message_valid() {
-        assert_eq!(validate_message("hello world"), None);
-        assert_eq!(validate_message("line1\nline2\ttab"), None);
+        assert!(validate_message("hello world").is_ok());
+        assert!(validate_message("line1\nline2\ttab").is_ok());
     }
 
     #[test]
     fn test_validate_message_control_chars() {
-        assert!(validate_message("hello\x00world").is_some());
-        assert!(validate_message("hello\x07world").is_some());
+        assert!(validate_message("hello\x00world").is_err());
+        assert!(validate_message("hello\x07world").is_err());
     }
 
     #[test]
     fn test_validate_message_too_large() {
         let big = "x".repeat(MAX_MESSAGE_SIZE + 1);
-        assert!(validate_message(&big).is_some());
+        assert!(validate_message(&big).is_err());
     }
 
     // ---- format_recipients ----
@@ -1052,11 +1035,8 @@ mod tests {
 
     #[test]
     fn test_match_target_tag_prefix() {
-        let (fns, ftb) = make_instances(&[
-            ("luna", Some("api")),
-            ("nova", Some("api")),
-            ("kira", None),
-        ]);
+        let (fns, ftb) =
+            make_instances(&[("luna", Some("api")), ("nova", Some("api")), ("kira", None)]);
         let result = match_target("api-", &fns, &ftb);
         assert!(result.contains(&"luna".to_string()));
         assert!(result.contains(&"nova".to_string()));
@@ -1087,10 +1067,7 @@ mod tests {
         ftb.insert("bigboss".to_string(), "bigboss".to_string());
         fns.push("bigboss".to_string());
 
-        assert_eq!(
-            match_target("bigboss:BOXE", &fns, &ftb),
-            vec!["bigboss"]
-        );
+        assert_eq!(match_target("bigboss:BOXE", &fns, &ftb), vec!["bigboss"]);
     }
 
     #[test]
@@ -1099,10 +1076,7 @@ mod tests {
         ftb.insert("luna:BOXE".to_string(), "luna".to_string());
         fns.push("luna:BOXE".to_string());
 
-        assert_eq!(
-            match_target("luna:BOXE", &fns, &ftb),
-            vec!["luna"]
-        );
+        assert_eq!(match_target("luna:BOXE", &fns, &ftb), vec!["luna"]);
     }
 
     #[test]
@@ -1182,9 +1156,11 @@ mod tests {
         let instances = vec![info("luna", None)];
         let result = compute_scope("use @mention to target", &instances, None);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("literal text @mention is not a valid target"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("literal text @mention is not a valid target")
+        );
     }
 
     #[test]
@@ -1361,31 +1337,37 @@ mod tests {
     #[test]
     fn test_message_scope_roundtrip() {
         assert_eq!(
-            MessageScope::from_str(MessageScope::Broadcast.as_str()),
+            MessageScope::Broadcast
+                .as_str()
+                .parse::<MessageScope>()
+                .ok(),
             Some(MessageScope::Broadcast)
         );
         assert_eq!(
-            MessageScope::from_str(MessageScope::Mentions.as_str()),
+            MessageScope::Mentions.as_str().parse::<MessageScope>().ok(),
             Some(MessageScope::Mentions)
         );
-        assert_eq!(MessageScope::from_str("invalid"), None);
+        assert!("invalid".parse::<MessageScope>().is_err());
     }
 
     #[test]
     fn test_message_intent_roundtrip() {
         assert_eq!(
-            MessageIntent::from_str(MessageIntent::Request.as_str()),
+            MessageIntent::Request
+                .as_str()
+                .parse::<MessageIntent>()
+                .ok(),
             Some(MessageIntent::Request)
         );
         assert_eq!(
-            MessageIntent::from_str(MessageIntent::Inform.as_str()),
+            MessageIntent::Inform.as_str().parse::<MessageIntent>().ok(),
             Some(MessageIntent::Inform)
         );
         assert_eq!(
-            MessageIntent::from_str(MessageIntent::Ack.as_str()),
+            MessageIntent::Ack.as_str().parse::<MessageIntent>().ok(),
             Some(MessageIntent::Ack)
         );
-        assert_eq!(MessageIntent::from_str("invalid"), None);
+        assert!("invalid".parse::<MessageIntent>().is_err());
     }
 
     // ---- format_hook_messages / format_messages_json ----
@@ -1399,13 +1381,7 @@ mod tests {
             "delivered_to": ["nova"],
         })];
 
-        let result = format_hook_messages(
-            &msgs,
-            "nova",
-            &|_name| None,
-            &|| String::new(),
-            None,
-        );
+        let result = format_hook_messages(&msgs, "nova", &|_name| None, &|| String::new(), None);
         assert!(result.contains("luna"));
         assert!(result.contains("nova"));
         assert!(result.contains("hello there"));
@@ -1429,13 +1405,7 @@ mod tests {
             }),
         ];
 
-        let result = format_hook_messages(
-            &msgs,
-            "nova",
-            &|_name| None,
-            &|| String::new(),
-            None,
-        );
+        let result = format_hook_messages(&msgs, "nova", &|_name| None, &|| String::new(), None);
         assert!(result.contains("[2 new messages]"));
         assert!(result.contains("first"));
         assert!(result.contains("second"));
@@ -1469,13 +1439,7 @@ mod tests {
             "delivered_to": ["nova"],
         })];
 
-        let result = format_messages_json(
-            &msgs,
-            "nova",
-            &|_name| None,
-            &|| String::new(),
-            None,
-        );
+        let result = format_messages_json(&msgs, "nova", &|_name| None, &|| String::new(), None);
         assert!(result.starts_with("<hcom>"));
         assert!(result.ends_with("</hcom>"));
     }
@@ -1489,13 +1453,7 @@ mod tests {
             "delivered_to": ["nova", "kira", "miso"],
         })];
 
-        let result = format_hook_messages(
-            &msgs,
-            "nova",
-            &|_name| None,
-            &|| String::new(),
-            None,
-        );
+        let result = format_hook_messages(&msgs, "nova", &|_name| None, &|| String::new(), None);
         // Should show "+2 others" for single message
         assert!(result.contains("+2 others"));
     }
@@ -1515,8 +1473,14 @@ mod tests {
         )];
 
         let active: HashMap<String, Value> = HashMap::from([
-            ("nova".to_string(), serde_json::json!({"tag": null, "session_id": "sess-1"})),
-            ("kira".to_string(), serde_json::json!({"tag": null, "session_id": "sess-2"})),
+            (
+                "nova".to_string(),
+                serde_json::json!({"tag": null, "session_id": "sess-1"}),
+            ),
+            (
+                "kira".to_string(),
+                serde_json::json!({"tag": null, "session_id": "sess-2"}),
+            ),
         ]);
 
         let mut deliver_events = HashMap::new();
@@ -1592,7 +1556,10 @@ mod tests {
         )];
 
         let active: HashMap<String, Value> = HashMap::from([
-            ("nova".to_string(), serde_json::json!({"tag": null, "session_id": "sess-1"})),
+            (
+                "nova".to_string(),
+                serde_json::json!({"tag": null, "session_id": "sess-1"}),
+            ),
             // External sender: no session_id → should be gated
             ("watcher".to_string(), serde_json::json!({"tag": null})),
         ]);
@@ -1636,7 +1603,7 @@ mod tests {
         )];
 
         let active: HashMap<String, Value> = HashMap::from([
-            ("watcher".to_string(), serde_json::json!({"tag": null})),  // External
+            ("watcher".to_string(), serde_json::json!({"tag": null})), // External
         ]);
 
         let mut deliver_events = HashMap::new();
@@ -1663,16 +1630,24 @@ mod tests {
     #[test]
     fn test_is_external_sender_data() {
         // Normal instance with session_id → not external
-        assert!(!is_external_sender_data(&serde_json::json!({"session_id": "sess-1"})));
+        assert!(!is_external_sender_data(
+            &serde_json::json!({"session_id": "sess-1"})
+        ));
 
         // External: no session_id
         assert!(is_external_sender_data(&serde_json::json!({"tag": null})));
-        assert!(is_external_sender_data(&serde_json::json!({"session_id": ""})));
+        assert!(is_external_sender_data(
+            &serde_json::json!({"session_id": ""})
+        ));
 
         // Remote: has origin_device_id → not external
-        assert!(!is_external_sender_data(&serde_json::json!({"origin_device_id": "dev-1"})));
+        assert!(!is_external_sender_data(
+            &serde_json::json!({"origin_device_id": "dev-1"})
+        ));
 
         // Subagent: has parent_session_id → not external
-        assert!(!is_external_sender_data(&serde_json::json!({"parent_session_id": "parent-sess"})));
+        assert!(!is_external_sender_data(
+            &serde_json::json!({"parent_session_id": "parent-sess"})
+        ));
     }
 }

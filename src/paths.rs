@@ -5,10 +5,9 @@
 //! Also provides atomic file operations and flag counters.
 
 use crate::config::Config;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-// ==================== Path Constants ====================
 
 pub const LOGS_DIR: &str = ".tmp/logs";
 pub const LAUNCH_DIR: &str = ".tmp/launch";
@@ -17,7 +16,41 @@ pub const LAUNCHES_DIR: &str = "launches";
 pub const ARCHIVE_DIR: &str = "archive";
 pub const SCRIPTS_DIR: &str = "scripts";
 
-// ==================== Base Path Helpers ====================
+/// Resolve HCOM_DIR from an environment snapshot.
+///
+/// Returns the normalized path plus whether HCOM_DIR was explicitly set.
+/// Normalization behavior:
+/// - `~` expands against HOME/USERPROFILE when available
+/// - relative paths are resolved against the provided cwd
+/// - otherwise falls back to `HOME/.hcom` or `.hcom`
+pub fn resolve_hcom_dir_from_env(env: &HashMap<String, String>, cwd: &Path) -> (PathBuf, bool) {
+    let home = env.get("HOME").or_else(|| env.get("USERPROFILE"));
+    let hcom_dir = env.get("HCOM_DIR").filter(|value| !value.is_empty());
+
+    let resolved = if let Some(dir) = hcom_dir {
+        let expanded = if dir.starts_with('~') {
+            if let Some(home_dir) = home {
+                dir.replacen('~', home_dir, 1)
+            } else {
+                dir.clone()
+            }
+        } else {
+            dir.clone()
+        };
+
+        let path = PathBuf::from(expanded);
+        if path.is_relative() {
+            cwd.join(path)
+        } else {
+            path
+        }
+    } else {
+        home.map(|home_dir| PathBuf::from(home_dir).join(".hcom"))
+            .unwrap_or_else(|| PathBuf::from(".hcom"))
+    };
+
+    (resolved, hcom_dir.is_some())
+}
 
 /// Get the hcom base directory.
 ///
@@ -38,15 +71,13 @@ pub fn hcom_path(parts: &[&str]) -> PathBuf {
 /// Get project root (parent of hcom_dir). Used for anchoring tool config files.
 ///
 /// Uses cached Config — for test-friendly env-reactive resolution, use
-/// `hooks::common::tool_config_root()` instead.
+/// `runtime_env::tool_config_root()` instead.
 pub fn get_project_root() -> PathBuf {
     hcom_dir()
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("/"))
 }
-
-// ==================== Derived Paths ====================
 
 /// Get the database path (hcom_dir/hcom.db)
 pub fn db_path() -> PathBuf {
@@ -73,8 +104,6 @@ pub fn scripts_dir() -> PathBuf {
     hcom_dir().join(SCRIPTS_DIR)
 }
 
-// ==================== Directory Management ====================
-
 /// Ensure all critical HCOM directories exist. Idempotent, safe to call repeatedly.
 /// Called at hook entry to support opt-in scenarios where hooks execute before CLI commands.
 /// Returns true on success, false on failure.
@@ -92,8 +121,6 @@ pub fn ensure_hcom_directories_at(base: &Path) -> bool {
     true
 }
 
-// ==================== Atomic File Operations ====================
-
 /// Write content to file atomically (temp file + rename).
 /// Returns the underlying IO error on failure for callers that need error detail.
 pub fn atomic_write_io(filepath: &Path, content: &str) -> std::io::Result<()> {
@@ -103,9 +130,7 @@ pub fn atomic_write_io(filepath: &Path, content: &str) -> std::io::Result<()> {
     }
 
     // Write to temp file in the same directory (same filesystem for rename)
-    let tmp = tempfile::NamedTempFile::new_in(
-        filepath.parent().unwrap_or_else(|| Path::new(".")),
-    )?;
+    let tmp = tempfile::NamedTempFile::new_in(filepath.parent().unwrap_or_else(|| Path::new(".")))?;
 
     // Write content and fsync before rename to ensure data is on disk
     std::io::Write::write_all(&mut &tmp, content.as_bytes())?;
@@ -121,8 +146,6 @@ pub fn atomic_write_io(filepath: &Path, content: &str) -> std::io::Result<()> {
 pub fn atomic_write(filepath: &Path, content: &str) -> bool {
     atomic_write_io(filepath, content).is_ok()
 }
-
-// ==================== Flag Counters ====================
 
 /// Increment a counter in .tmp/flags/{name} and return new value.
 pub fn increment_flag_counter(name: &str) -> i32 {
@@ -194,16 +217,28 @@ mod tests {
         let tmp = TempDir::new().unwrap();
 
         // Counter starts at 0 (read raw flag file)
-        assert_eq!(read_flag_file(&tmp.path().join(FLAGS_DIR).join("test_flag")), 0);
+        assert_eq!(
+            read_flag_file(&tmp.path().join(FLAGS_DIR).join("test_flag")),
+            0
+        );
 
         assert_eq!(increment_flag_counter_at(tmp.path(), "test_flag"), 1);
-        assert_eq!(read_flag_file(&tmp.path().join(FLAGS_DIR).join("test_flag")), 1);
+        assert_eq!(
+            read_flag_file(&tmp.path().join(FLAGS_DIR).join("test_flag")),
+            1
+        );
 
         assert_eq!(increment_flag_counter_at(tmp.path(), "test_flag"), 2);
-        assert_eq!(read_flag_file(&tmp.path().join(FLAGS_DIR).join("test_flag")), 2);
+        assert_eq!(
+            read_flag_file(&tmp.path().join(FLAGS_DIR).join("test_flag")),
+            2
+        );
 
         // Different flag is independent
-        assert_eq!(read_flag_file(&tmp.path().join(FLAGS_DIR).join("other_flag")), 0);
+        assert_eq!(
+            read_flag_file(&tmp.path().join(FLAGS_DIR).join("other_flag")),
+            0
+        );
     }
 
     #[test]
@@ -215,5 +250,32 @@ mod tests {
             base.parent().unwrap().to_path_buf(),
             PathBuf::from("/home/test")
         );
+    }
+
+    #[test]
+    fn test_resolve_hcom_dir_default() {
+        let env = HashMap::from([("HOME".to_string(), "/home/test".to_string())]);
+        let (path, overridden) = resolve_hcom_dir_from_env(&env, Path::new("/worktree"));
+        assert_eq!(path, PathBuf::from("/home/test/.hcom"));
+        assert!(!overridden);
+    }
+
+    #[test]
+    fn test_resolve_hcom_dir_expands_tilde() {
+        let env = HashMap::from([
+            ("HOME".to_string(), "/home/test".to_string()),
+            ("HCOM_DIR".to_string(), "~/custom/.hcom".to_string()),
+        ]);
+        let (path, overridden) = resolve_hcom_dir_from_env(&env, Path::new("/worktree"));
+        assert_eq!(path, PathBuf::from("/home/test/custom/.hcom"));
+        assert!(overridden);
+    }
+
+    #[test]
+    fn test_resolve_hcom_dir_makes_relative_absolute() {
+        let env = HashMap::from([("HCOM_DIR".to_string(), "relative/.hcom".to_string())]);
+        let (path, overridden) = resolve_hcom_dir_from_env(&env, Path::new("/worktree"));
+        assert_eq!(path, PathBuf::from("/worktree").join("relative/.hcom"));
+        assert!(overridden);
     }
 }

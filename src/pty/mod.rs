@@ -34,9 +34,9 @@ use terminal::TerminalGuard;
 use crate::config::Config;
 use crate::db::HcomDb;
 use crate::delivery::{DeliveryState, ScreenState, ToolConfig, run_delivery_loop};
-use crate::shared::status_icon;
 use crate::log::{log_error, log_info, log_warn};
 use crate::notify::NotifyServer;
+use crate::shared::status_icon;
 
 /// Tracks what type of incomplete escape sequence is pending on stdout.
 /// Used to defer title writes until the sequence completes across read boundaries.
@@ -492,7 +492,6 @@ pub struct ProxyConfig {
     /// Pattern to detect when tool is ready (e.g., b"? for shortcuts")
     pub ready_pattern: Vec<u8>,
     /// Instance name for logging and database tracking
-    #[allow(dead_code)]
     pub instance_name: Option<String>,
     /// Tool name (claude, gemini, codex)
     pub tool: String,
@@ -818,7 +817,10 @@ impl Proxy {
                     let mut eagain_retries = 0;
                     loop {
                         match nix_read(&self.pty_master, &mut buf) {
-                            Ok(0) => { hit_eof = true; break; }
+                            Ok(0) => {
+                                hit_eof = true;
+                                break;
+                            }
                             Ok(n) => {
                                 eagain_retries = 0; // reset on successful read
                                 let data = &buf[..n];
@@ -839,13 +841,8 @@ impl Proxy {
                                 if !coalesced.is_empty() && eagain_retries < 1 {
                                     eagain_retries += 1;
                                     // Short poll: wait up to 1ms for trailing fragment
-                                    let retry_bfd = unsafe {
-                                        BorrowedFd::borrow_raw(master_raw)
-                                    };
-                                    let mut retry_fds = [PollFd::new(
-                                        retry_bfd,
-                                        PollFlags::POLLIN,
-                                    )];
+                                    let retry_bfd = unsafe { BorrowedFd::borrow_raw(master_raw) };
+                                    let mut retry_fds = [PollFd::new(retry_bfd, PollFlags::POLLIN)];
                                     let _ = poll(&mut retry_fds, PollTimeout::from(1u16));
                                     // If data arrived, loop back to read it
                                     if retry_fds[0]
@@ -857,8 +854,14 @@ impl Proxy {
                                 }
                                 break;
                             }
-                            Err(Errno::EIO) => { hit_eof = true; break; }
-                            Err(e) => { hit_error = Some(e); break; }
+                            Err(Errno::EIO) => {
+                                hit_eof = true;
+                                break;
+                            }
+                            Err(e) => {
+                                hit_error = Some(e);
+                                break;
+                            }
                         }
                     }
 
@@ -893,8 +896,8 @@ impl Proxy {
                             );
                         }
                         if !delivery_started {
-                            let should_start = ready_signaled
-                                || startup_time.elapsed() > delivery_start_timeout;
+                            let should_start =
+                                ready_signaled || startup_time.elapsed() > delivery_start_timeout;
                             if should_start {
                                 self.screen.dump_screen(
                                     &self.config.tool,
@@ -907,7 +910,9 @@ impl Proxy {
                         }
                     }
 
-                    if hit_eof { break; }
+                    if hit_eof {
+                        break;
+                    }
                     if let Some(e) = hit_error {
                         bail!("read from pty failed: {}", e);
                     }
@@ -1002,8 +1007,7 @@ impl Proxy {
                 if !name.is_empty() && (name != last_written_name || status != last_written_status)
                 {
                     let icon = status_icon(&status);
-                    let tool_upper = self.config.tool.to_uppercase();
-                    let title = format!("{} {} [{}]", icon, name, tool_upper);
+                    let title = format!("{} {} [{}]", icon, name, self.config.tool);
                     let escape = format!("\x1b]1;{}\x07\x1b]2;{}\x07", title, title);
                     write_all(&stdout_fd, escape.as_bytes())?;
                     last_written_name = name;
@@ -1051,11 +1055,7 @@ impl Proxy {
             // - Return value is intentionally ignored: terminal resize is best-effort; failure is non-fatal
             //   and doesn't affect correctness (child process continues with old size)
             unsafe {
-                libc::ioctl(
-                    self.pty_master.as_raw_fd(),
-                    libc::TIOCSWINSZ,
-                    &winsize,
-                );
+                libc::ioctl(self.pty_master.as_raw_fd(), libc::TIOCSWINSZ, &winsize);
             }
         }
         Ok(())
@@ -1138,7 +1138,7 @@ impl Proxy {
             state.ready = self.screen.is_ready();
             state.approval = self.screen.is_waiting_approval();
             let input_text = self.screen.get_input_box_text(&self.config.tool);
-            state.prompt_empty = input_text.as_ref().map_or(false, |t| t.is_empty());
+            state.prompt_empty = input_text.as_ref().is_some_and(|t| t.is_empty());
             state.input_text = input_text;
             state.last_output = self.screen.last_output_instant();
             state.cols = self.screen.cols();

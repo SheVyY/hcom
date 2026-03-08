@@ -28,9 +28,15 @@ pub fn parse_resume_argv(argv: &[String], cmd: &str) -> Result<(String, Vec<Stri
     // Skip command name and global flags
     while i < argv.len() {
         match argv[i].as_str() {
-            s if s == cmd || s == "resume" || s == "fork" || s == "f" => { i += 1; }
-            "--name" => { i += 2; }
-            "--go" => { i += 1; }
+            s if s == cmd || s == "resume" || s == "fork" || s == "f" => {
+                i += 1;
+            }
+            "--name" => {
+                i += 2;
+            }
+            "--go" => {
+                i += 1;
+            }
             _ => break,
         }
     }
@@ -53,23 +59,29 @@ pub fn do_resume(
     flags: &GlobalFlags,
 ) -> Result<i32> {
     let db = HcomDb::open()?;
+    let name = crate::instances::resolve_display_name_or_stopped(&db, name)
+        .unwrap_or_else(|| name.to_string());
 
     // For resume (not fork): reject if instance is still active
     if !fork {
-        if let Ok(Some(_)) = db.get_instance_full(name) {
+        if let Ok(Some(_)) = db.get_instance_full(&name) {
             bail!("'{}' is still active — run hcom stop {} first", name, name);
         }
     }
 
     // Load snapshot: from active instance (fork) or stopped event (resume)
     let (tool, session_id, launch_args_str, tag, background, last_event_id, snapshot_dir) = if fork {
-        load_instance_data(&db, name)?
+        load_instance_data(&db, &name)?
     } else {
-        load_stopped_snapshot(&db, name)?
+        load_stopped_snapshot(&db, &name)?
     };
 
     if session_id.is_empty() {
-        bail!("No session ID found for '{}' — cannot {}", name, if fork { "fork" } else { "resume" });
+        bail!(
+            "No session ID found for '{}' — cannot {}",
+            name,
+            if fork { "fork" } else { "resume" }
+        );
     }
 
     // Extract hcom-level flags (--tag, --terminal, --dir) from extra args before tool parsing
@@ -109,7 +121,7 @@ pub fn do_resume(
     let mut tool_args = build_resume_args(&tool, &session_id, fork);
 
     // Append cleaned extra args (without --tag/--terminal)
-    tool_args.extend(clean_extra.into_iter());
+    tool_args.extend(clean_extra);
 
     // Merge with original launch args
     let original_args: Vec<String> = if !launch_args_str.is_empty() {
@@ -130,15 +142,25 @@ pub fn do_resume(
     let use_pty = tool == "claude" && !is_headless && cfg!(unix);
 
     // Resolve launcher name: explicit --name flag > identity > "user"
-    let launcher_name = flags.name.clone().unwrap_or_else(|| {
-        identity::resolve_identity(
-            &db, None, None, None,
-            std::env::var("HCOM_PROCESS_ID").ok().as_deref(),
-            None, None,
-        )
+    let launcher_name = flags
+        .name
+        .as_deref()
+        .and_then(|value| identity::resolve_identity(&db, Some(value), None, None, None, None, None).ok())
         .map(|id| id.name)
-        .unwrap_or_else(|_| "user".to_string())
-    });
+        .or_else(|| flags.name.clone())
+        .unwrap_or_else(|| {
+            identity::resolve_identity(
+                &db,
+                None,
+                None,
+                None,
+                std::env::var("HCOM_PROCESS_ID").ok().as_deref(),
+                None,
+                None,
+            )
+            .map(|id| id.name)
+            .unwrap_or_else(|_| "user".to_string())
+        });
 
     // Launch
     let result = launcher::launch(
@@ -166,7 +188,7 @@ pub fn do_resume(
             run_here: None,
             initial_prompt: None,
             batch_id: None,
-            name: if fork { None } else { Some(name.to_string()) },
+            name: if fork { None } else { Some(name.clone()) },
             skip_validation: true,
             terminal: terminal_override,
         },
@@ -176,11 +198,8 @@ pub fn do_resume(
     if !fork && last_event_id > 0 {
         crate::instances::update_instance_position(
             &db,
-            name,
-            &serde_json::Map::from_iter([(
-                "last_event_id".to_string(),
-                json!(last_event_id),
-            )]),
+            &name,
+            &serde_json::Map::from_iter([("last_event_id".to_string(), json!(last_event_id))]),
         );
     }
 
@@ -192,7 +211,10 @@ pub fn do_resume(
     log_info(
         if fork { "fork" } else { "resume" },
         &format!("cmd.{}", if fork { "fork" } else { "resume" }),
-        &format!("name={} tool={} session={} launched={}", name, tool, session_id, result.launched),
+        &format!(
+            "name={} tool={} session={} launched={}",
+            name, tool, session_id, result.launched
+        ),
     );
 
     Ok(if result.launched > 0 { 0 } else { 1 })
@@ -239,7 +261,10 @@ fn extract_hcom_flags(args: &[String]) -> (Option<String>, Option<String>, Optio
 }
 
 /// Load data from an active or stopped instance.
-fn load_instance_data(db: &HcomDb, name: &str) -> Result<(String, String, String, String, bool, i64, String)> {
+fn load_instance_data(
+    db: &HcomDb,
+    name: &str,
+) -> Result<(String, String, String, String, bool, i64, String)> {
     // Try active instance first
     if let Ok(Some(inst)) = db.get_instance_full(name) {
         return Ok((
@@ -258,7 +283,10 @@ fn load_instance_data(db: &HcomDb, name: &str) -> Result<(String, String, String
 }
 
 /// Load stopped snapshot from life events.
-fn load_stopped_snapshot(db: &HcomDb, name: &str) -> Result<(String, String, String, String, bool, i64, String)> {
+fn load_stopped_snapshot(
+    db: &HcomDb,
+    name: &str,
+) -> Result<(String, String, String, String, bool, i64, String)> {
     // Query the latest "stopped" life event for this instance
     let mut stmt = db.conn().prepare(
         "SELECT data FROM events WHERE type='life' AND instance=? ORDER BY id DESC LIMIT 10",

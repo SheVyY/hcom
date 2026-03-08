@@ -12,7 +12,10 @@ use crate::db::HcomDb;
 
 /// Parsed arguments for `hcom term`.
 #[derive(clap::Parser, Debug)]
-#[command(name = "term", about = "Terminal admin: screen query, injection, debug")]
+#[command(
+    name = "term",
+    about = "Terminal admin: screen query, injection, debug"
+)]
 pub struct TermArgs {
     /// Subcommand and arguments
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -40,9 +43,10 @@ fn get_inject_port(db: &HcomDb, instance_name: &str) -> Option<i32> {
 
 /// Get all instances that have inject ports registered.
 fn get_pty_instances(db: &HcomDb) -> Vec<(String, i32)> {
-    let mut stmt = match db.conn().prepare(
-        "SELECT instance, port FROM notify_endpoints WHERE kind = 'inject'",
-    ) {
+    let mut stmt = match db
+        .conn()
+        .prepare("SELECT instance, port FROM notify_endpoints WHERE kind = 'inject'")
+    {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
@@ -57,11 +61,9 @@ fn get_pty_instances(db: &HcomDb) -> Vec<(String, i32)> {
 
 /// Send data on a single TCP connection.
 fn inject_raw(port: i32, data: &[u8]) -> Result<(), String> {
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
-        .map_err(|e| format!("connect: {e}"))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .ok();
+    let mut stream =
+        TcpStream::connect(format!("127.0.0.1:{port}")).map_err(|e| format!("connect: {e}"))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
     stream.write_all(data).map_err(|e| format!("write: {e}"))?;
     Ok(())
 }
@@ -213,12 +215,7 @@ fn list_logs() -> i32 {
         .ok()
         .map(|rd| {
             rd.filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        == Some("log")
-                })
+                .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("log"))
                 .filter_map(|e| {
                     let size = e.metadata().ok()?.len();
                     Some((e.path(), size))

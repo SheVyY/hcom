@@ -153,9 +153,7 @@ pub fn validate_bundle(bundle: &mut Value) -> Result<(), String> {
         return Err("description must be a string".into());
     }
 
-    let refs = obj
-        .get("refs")
-        .ok_or("refs must be an object")?;
+    let refs = obj.get("refs").ok_or("refs must be an object")?;
     if !refs.is_object() {
         return Err("refs must be an object".into());
     }
@@ -175,36 +173,30 @@ pub fn validate_bundle(bundle: &mut Value) -> Result<(), String> {
         .as_array()
         .is_some_and(|a| a.is_empty())
     {
-        return Err(
-            "refs.transcript is required\n\
+        return Err("refs.transcript is required\n\
              Find ranges: hcom transcript <agent> [--last N]\n\
              Format: \"1-5:normal,10:full\""
-                .into(),
-        );
+            .into());
     }
     if refs_obj["events"].as_array().is_some_and(|a| a.is_empty()) {
-        return Err(
-            "refs.events is required\n\
+        return Err("refs.events is required\n\
              Find events: hcom events [--last N]\n\
              Format: \"123,124\" or \"100-105\""
-                .into(),
-        );
+            .into());
     }
     if refs_obj["files"].as_array().is_some_and(|a| a.is_empty()) {
-        return Err(
-            "refs.files is required\n\
+        return Err("refs.files is required\n\
              Include files you created, modified, discussed, or are relevant\n\
              Format: \"src/main.py,tests/test.py\""
-                .into(),
-        );
+            .into());
     }
 
     // Parse and normalize transcript refs
     let transcript_arr = refs_obj["transcript"].as_array().unwrap().clone();
     let mut normalized = Vec::with_capacity(transcript_arr.len());
     for ref_val in &transcript_arr {
-        let parsed = parse_transcript_ref(ref_val)
-            .map_err(|e| format!("Invalid transcript ref: {}", e))?;
+        let parsed =
+            parse_transcript_ref(ref_val).map_err(|e| format!("Invalid transcript ref: {}", e))?;
         normalized.push(parsed);
     }
 
@@ -327,9 +319,7 @@ pub fn create_bundle_event(
 /// Parse inline bundle creation flags from argv.
 ///
 /// Returns (bundle_json, remaining_argv) if --title present, (None, argv) otherwise.
-pub fn parse_inline_bundle_flags(
-    argv: &[String],
-) -> Result<(Option<Value>, Vec<String>), String> {
+pub fn parse_inline_bundle_flags(argv: &[String]) -> Result<(Option<Value>, Vec<String>), String> {
     let bundle_flags = &[
         "--title",
         "--description",
@@ -397,21 +387,9 @@ pub fn parse_inline_bundle_flags(
         .and_then(|v| v.clone())
         .ok_or("--description is required when --title is present")?;
 
-    let events = parse_csv_list(
-        flag_values
-            .get("--events")
-            .and_then(|v| v.as_deref()),
-    );
-    let files = parse_csv_list(
-        flag_values
-            .get("--files")
-            .and_then(|v| v.as_deref()),
-    );
-    let transcript = parse_csv_list(
-        flag_values
-            .get("--transcript")
-            .and_then(|v| v.as_deref()),
-    );
+    let events = parse_csv_list(flag_values.get("--events").and_then(|v| v.as_deref()));
+    let files = parse_csv_list(flag_values.get("--files").and_then(|v| v.as_deref()));
+    let transcript = parse_csv_list(flag_values.get("--transcript").and_then(|v| v.as_deref()));
 
     let mut bundle = serde_json::json!({
         "title": title,
@@ -446,18 +424,12 @@ mod tests {
 
     #[test]
     fn test_parse_csv_list_basic() {
-        assert_eq!(
-            parse_csv_list(Some("a,b,c")),
-            vec!["a", "b", "c"]
-        );
+        assert_eq!(parse_csv_list(Some("a,b,c")), vec!["a", "b", "c"]);
     }
 
     #[test]
     fn test_parse_csv_list_trim() {
-        assert_eq!(
-            parse_csv_list(Some(" a , b , c ")),
-            vec!["a", "b", "c"]
-        );
+        assert_eq!(parse_csv_list(Some(" a , b , c ")), vec!["a", "b", "c"]);
     }
 
     #[test]
@@ -652,12 +624,7 @@ mod tests {
 
     #[test]
     fn test_parse_inline_duplicate_flag() {
-        let argv: Vec<String> = vec![
-            "--title".into(),
-            "A".into(),
-            "--title".into(),
-            "B".into(),
-        ];
+        let argv: Vec<String> = vec!["--title".into(), "A".into(), "--title".into(), "B".into()];
         let err = parse_inline_bundle_flags(&argv).unwrap_err();
         assert!(err.contains("Duplicate flag"));
     }

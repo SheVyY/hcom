@@ -1,8 +1,4 @@
-//! OpenCode launch preprocessing.
-//!
-//! Port of OpenCode-specific env setup from launcher.py lines 800-827.
-//!
-//! Minimal preprocessing: sets environment variables for hcom integration.
+//! OpenCode launch preprocessing — sets environment variables for hcom integration.
 //! Plugin management is handled separately in hooks/opencode.rs.
 
 use std::collections::HashMap;

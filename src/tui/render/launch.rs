@@ -26,7 +26,10 @@ pub fn render_launch_inline(frame: &mut Frame, area: Rect, app: &App) {
 
     lines.push(field_row(
         "Terminal",
-        ls.terminal_presets.get(ls.terminal).map(|s| s.as_str()).unwrap_or("auto"),
+        ls.terminal_presets
+            .get(ls.terminal)
+            .map(|s| s.as_str())
+            .unwrap_or("auto"),
         LaunchField::Terminal,
         ls,
         w,

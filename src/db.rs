@@ -13,11 +13,11 @@ use rusqlite::{Connection, params};
 /// Schema version - bump on any schema change (no migrations, archive + recreate)
 const SCHEMA_VERSION: i32 = 16;
 
-use crate::shared::constants::{now_epoch_f64, now_epoch_i64, MENTION_PATTERN, ST_LISTENING};
+use crate::shared::constants::{MENTION_PATTERN, ST_LISTENING};
+use crate::shared::time::{now_epoch_f64, now_epoch_i64};
 
 /// File-write tool contexts for collision detection
-const FILE_WRITE_CONTEXTS: &str =
-    "('tool:Write', 'tool:Edit', 'tool:write_file', 'tool:replace', 'tool:apply_patch', 'tool:write', 'tool:edit')";
+const FILE_WRITE_CONTEXTS: &str = "('tool:Write', 'tool:Edit', 'tool:write_file', 'tool:replace', 'tool:apply_patch', 'tool:write', 'tool:edit')";
 
 /// Message from the events table
 #[derive(Debug, Clone)]
@@ -89,34 +89,70 @@ impl InstanceRow {
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             name: row.get("name")?,
-            session_id: row.get::<_, Option<String>>("session_id")?.filter(|s| !s.is_empty()),
-            parent_session_id: row.get::<_, Option<String>>("parent_session_id")?.filter(|s| !s.is_empty()),
-            parent_name: row.get::<_, Option<String>>("parent_name")?.filter(|s| !s.is_empty()),
-            agent_id: row.get::<_, Option<String>>("agent_id")?.filter(|s| !s.is_empty()),
-            tag: row.get::<_, Option<String>>("tag")?.filter(|s| !s.is_empty()),
+            session_id: row
+                .get::<_, Option<String>>("session_id")?
+                .filter(|s| !s.is_empty()),
+            parent_session_id: row
+                .get::<_, Option<String>>("parent_session_id")?
+                .filter(|s| !s.is_empty()),
+            parent_name: row
+                .get::<_, Option<String>>("parent_name")?
+                .filter(|s| !s.is_empty()),
+            agent_id: row
+                .get::<_, Option<String>>("agent_id")?
+                .filter(|s| !s.is_empty()),
+            tag: row
+                .get::<_, Option<String>>("tag")?
+                .filter(|s| !s.is_empty()),
             last_event_id: row.get::<_, Option<i64>>("last_event_id")?.unwrap_or(0),
             last_stop: row.get::<_, Option<i64>>("last_stop")?.unwrap_or(0),
-            status: row.get::<_, Option<String>>("status")?.unwrap_or_else(|| "inactive".into()),
+            status: row
+                .get::<_, Option<String>>("status")?
+                .unwrap_or_else(|| "inactive".into()),
             status_time: row.get::<_, Option<i64>>("status_time")?.unwrap_or(0),
-            status_context: row.get::<_, Option<String>>("status_context")?.unwrap_or_default(),
-            status_detail: row.get::<_, Option<String>>("status_detail")?.unwrap_or_default(),
-            directory: row.get::<_, Option<String>>("directory")?.unwrap_or_default(),
+            status_context: row
+                .get::<_, Option<String>>("status_context")?
+                .unwrap_or_default(),
+            status_detail: row
+                .get::<_, Option<String>>("status_detail")?
+                .unwrap_or_default(),
+            directory: row
+                .get::<_, Option<String>>("directory")?
+                .unwrap_or_default(),
             created_at: row.get::<_, Option<f64>>("created_at")?.unwrap_or(0.0),
-            transcript_path: row.get::<_, Option<String>>("transcript_path")?.unwrap_or_default(),
-            tool: row.get::<_, Option<String>>("tool")?.unwrap_or_else(|| "claude".into()),
+            transcript_path: row
+                .get::<_, Option<String>>("transcript_path")?
+                .unwrap_or_default(),
+            tool: row
+                .get::<_, Option<String>>("tool")?
+                .unwrap_or_else(|| "claude".into()),
             background: row.get::<_, Option<i64>>("background")?.unwrap_or(0),
-            background_log_file: row.get::<_, Option<String>>("background_log_file")?.unwrap_or_default(),
+            background_log_file: row
+                .get::<_, Option<String>>("background_log_file")?
+                .unwrap_or_default(),
             tcp_mode: row.get::<_, Option<i64>>("tcp_mode")?.unwrap_or(0),
             wait_timeout: row.get::<_, Option<i64>>("wait_timeout")?,
             subagent_timeout: row.get::<_, Option<i64>>("subagent_timeout")?,
-            hints: row.get::<_, Option<String>>("hints")?.filter(|s| !s.is_empty()),
-            origin_device_id: row.get::<_, Option<String>>("origin_device_id")?.filter(|s| !s.is_empty()),
+            hints: row
+                .get::<_, Option<String>>("hints")?
+                .filter(|s| !s.is_empty()),
+            origin_device_id: row
+                .get::<_, Option<String>>("origin_device_id")?
+                .filter(|s| !s.is_empty()),
             pid: row.get::<_, Option<i64>>("pid")?,
-            launch_args: row.get::<_, Option<String>>("launch_args")?.filter(|s| !s.is_empty()),
-            launch_context: row.get::<_, Option<String>>("launch_context")?.filter(|s| !s.is_empty()),
+            launch_args: row
+                .get::<_, Option<String>>("launch_args")?
+                .filter(|s| !s.is_empty()),
+            launch_context: row
+                .get::<_, Option<String>>("launch_context")?
+                .filter(|s| !s.is_empty()),
             name_announced: row.get::<_, Option<i64>>("name_announced")?.unwrap_or(0),
-            running_tasks: row.get::<_, Option<String>>("running_tasks")?.filter(|s| !s.is_empty()),
-            idle_since: row.get::<_, Option<String>>("idle_since")?.filter(|s| !s.is_empty()),
+            running_tasks: row
+                .get::<_, Option<String>>("running_tasks")?
+                .filter(|s| !s.is_empty()),
+            idle_since: row
+                .get::<_, Option<String>>("idle_since")?
+                .filter(|s| !s.is_empty()),
         })
     }
 }
@@ -324,7 +360,6 @@ impl HcomDb {
                 json_extract(data, '$.sender_kind') as msg_sender_kind,
                 json_extract(data, '$.delivered_to') as msg_delivered_to,
                 json_extract(data, '$.mentions') as msg_mentions,
-                json_extract(data, '$.bundle_id') as msg_bundle_id,
                 json_extract(data, '$.intent') as msg_intent,
                 json_extract(data, '$.thread') as msg_thread,
                 json_extract(data, '$.reply_to') as msg_reply_to,
@@ -399,8 +434,12 @@ impl HcomDb {
                 }
 
                 // Reconnect to fresh DB file
-                let new_conn = Connection::open(&self.db_path)
-                    .with_context(|| format!("Failed to reopen DB after archive: {}", self.db_path.display()))?;
+                let new_conn = Connection::open(&self.db_path).with_context(|| {
+                    format!(
+                        "Failed to reopen DB after archive: {}",
+                        self.db_path.display()
+                    )
+                })?;
                 new_conn.execute_batch(
                     "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;",
                 )?;
@@ -438,18 +477,19 @@ impl HcomDb {
             .filter_map(|r| r.ok())
             .collect();
 
-        let required: std::collections::HashSet<&str> =
-            ["events", "instances", "kv", "notify_endpoints", "session_bindings"]
-                .into_iter()
-                .collect();
+        let required: std::collections::HashSet<&str> = [
+            "events",
+            "instances",
+            "kv",
+            "notify_endpoints",
+            "session_bindings",
+        ]
+        .into_iter()
+        .collect();
 
         if version == 0 {
             // Race handling: another process may be initializing
-            if !tables.is_empty()
-                && required
-                    .iter()
-                    .any(|t| tables.contains(*t))
-            {
+            if !tables.is_empty() && required.iter().any(|t| tables.contains(*t)) {
                 let mut resolved_version = 0i32;
                 for _ in 0..20 {
                     let v2: i32 = self
@@ -493,10 +533,7 @@ impl HcomDb {
                 return Ok(SchemaCompat::Ok);
             }
             // Pre-versioned DB with our tables - needs archive
-            if required
-                .iter()
-                .any(|t| tables.contains(*t))
-            {
+            if required.iter().any(|t| tables.contains(*t)) {
                 return Ok(SchemaCompat::NeedsArchive(
                     "Pre-versioned DB found".to_string(),
                 ));
@@ -526,14 +563,9 @@ impl HcomDb {
         }
 
         // Verify required tables exist
-        let have_all = required
-            .iter()
-            .all(|t| tables.contains(*t));
+        let have_all = required.iter().all(|t| tables.contains(*t));
         if !have_all {
-            let missing: Vec<&&str> = required
-                .iter()
-                .filter(|t| !tables.contains(**t))
-                .collect();
+            let missing: Vec<&&str> = required.iter().filter(|t| !tables.contains(**t)).collect();
             return Ok(SchemaCompat::NeedsArchive(format!(
                 "DB missing tables {:?}",
                 missing
@@ -620,13 +652,15 @@ impl HcomDb {
              LEFT JOIN process_bindings p ON i.name = p.instance_name \
              LEFT JOIN notify_endpoints n_pty ON i.name = n_pty.instance AND n_pty.kind = 'pty' \
              LEFT JOIN notify_endpoints n_inj ON i.name = n_inj.instance AND n_inj.kind = 'inject' \
-             WHERE i.pid IS NOT NULL"
-        ) else { return };
+             WHERE i.pid IS NOT NULL",
+        ) else {
+            return;
+        };
 
         let Ok(rows) = stmt.query_map([], |row| {
             Ok((
-                row.get::<_, String>(0)?,     // name
-                row.get::<_, i64>(1)?,         // pid
+                row.get::<_, String>(0)?,         // name
+                row.get::<_, i64>(1)?,            // pid
                 row.get::<_, Option<String>>(2)?, // tool
                 row.get::<_, Option<String>>(3)?, // directory
                 row.get::<_, Option<String>>(4)?, // session_id
@@ -634,9 +668,12 @@ impl HcomDb {
                 row.get::<_, Option<i64>>(6)?,    // notify_port
                 row.get::<_, Option<i64>>(7)?,    // inject_port
             ))
-        }) else { return };
+        }) else {
+            return;
+        };
 
-        let pidfile_path = self.db_path
+        let pidfile_path = self
+            .db_path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .join(".tmp")
@@ -650,25 +687,26 @@ impl HcomDb {
                 .unwrap_or_default();
 
         for row in rows.flatten() {
-            let (name, pid, tool, directory, session_id, process_id, notify_port, inject_port) = row;
-            // Check if process is alive
-            // SAFETY: kill(pid, 0) is a standard POSIX signal check, no actual signal sent
-            let alive = unsafe { libc::kill(pid as i32, 0) } == 0
-                || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+            let (name, pid, tool, directory, session_id, process_id, notify_port, inject_port) =
+                row;
+            let alive = crate::pidtrack::is_alive(pid as u32);
             if !alive {
                 continue;
             }
 
-            piddata.insert(pid.to_string(), serde_json::json!({
-                "tool": tool.unwrap_or_else(|| "claude".to_string()),
-                "names": [name],
-                "directory": directory.unwrap_or_default(),
-                "process_id": process_id.unwrap_or_default(),
-                "session_id": session_id.unwrap_or_default(),
-                "notify_port": notify_port.unwrap_or(0),
-                "inject_port": inject_port.unwrap_or(0),
-                "launched_at": now_epoch_f64(),
-            }));
+            piddata.insert(
+                pid.to_string(),
+                serde_json::json!({
+                    "tool": tool.unwrap_or_else(|| "claude".to_string()),
+                    "names": [name],
+                    "directory": directory.unwrap_or_default(),
+                    "process_id": process_id.unwrap_or_default(),
+                    "session_id": session_id.unwrap_or_default(),
+                    "notify_port": notify_port.unwrap_or(0),
+                    "inject_port": inject_port.unwrap_or(0),
+                    "launched_at": now_epoch_f64(),
+                }),
+            );
         }
 
         if let Ok(json) = serde_json::to_string(&piddata) {
@@ -735,7 +773,10 @@ impl HcomDb {
         if from == receiver {
             return false;
         }
-        let scope = json.get("scope").and_then(|s| s.as_str()).unwrap_or("broadcast");
+        let scope = json
+            .get("scope")
+            .and_then(|s| s.as_str())
+            .unwrap_or("broadcast");
         match scope {
             "broadcast" => true,
             "mentions" => {
@@ -936,11 +977,7 @@ impl HcomDb {
         // Emit ready event and batch notification on first status update
         if is_new {
             if let Err(e) = self.emit_ready_event(name, status, context) {
-                crate::log::log_error(
-                    "db",
-                    "set_status.emit_ready_event",
-                    &format!("{e}"),
-                );
+                crate::log::log_error("db", "set_status.emit_ready_event", &format!("{e}"));
             }
         }
 
@@ -1166,10 +1203,13 @@ impl HcomDb {
     }
 
     /// Get process binding with session_id. Returns (session_id, instance_name).
-    pub fn get_process_binding_full(&self, process_id: &str) -> Result<Option<(Option<String>, String)>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT session_id, instance_name FROM process_bindings WHERE process_id = ?")?;
+    pub fn get_process_binding_full(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<(Option<String>, String)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT session_id, instance_name FROM process_bindings WHERE process_id = ?",
+        )?;
 
         match stmt.query_row(params![process_id], |row| {
             Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
@@ -1209,11 +1249,7 @@ impl HcomDb {
             Ok(Some(status)) => status.last_event_id,
             Ok(None) => 0, // No instance found
             Err(e) => {
-                crate::log::log_error(
-                    "db",
-                    "get_cursor.get_instance_status",
-                    &format!("{e}"),
-                );
+                crate::log::log_error("db", "get_cursor.get_instance_status", &format!("{e}"));
                 0
             }
         }
@@ -1241,18 +1277,15 @@ impl HcomDb {
             Ok(Some(status)) => status.last_event_id,
             Ok(None) => 0,
             Err(e) => {
-                crate::log::log_error(
-                    "db",
-                    "has_pending.get_instance_status",
-                    &format!("{e}"),
-                );
+                crate::log::log_error("db", "has_pending.get_instance_status", &format!("{e}"));
                 0
             }
         };
 
-        let mut stmt = match self.conn.prepare_cached(
-            "SELECT data FROM events WHERE id > ? AND type = 'message'",
-        ) {
+        let mut stmt = match self
+            .conn
+            .prepare_cached("SELECT data FROM events WHERE id > ? AND type = 'message'")
+        {
             Ok(s) => s,
             Err(e) => {
                 crate::log::log_error("db", "has_pending.prepare", &format!("{e}"));
@@ -1420,8 +1453,6 @@ impl HcomDb {
         Ok(deleted as u32)
     }
 
-    // ==================== KV Store ====================
-
     /// Get value from kv table.
     pub fn kv_get(&self, key: &str) -> Result<Option<String>> {
         match self
@@ -1472,8 +1503,6 @@ impl HcomDb {
         Ok(rows)
     }
 
-    // ==================== Session Bindings ====================
-
     /// Get instance name bound to session_id, or None if not bound.
     pub fn get_session_binding(&self, session_id: &str) -> Result<Option<String>> {
         if session_id.is_empty() {
@@ -1506,7 +1535,8 @@ impl HcomDb {
                         if let Ok(tasks) = serde_json::from_str::<serde_json::Value>(rt) {
                             if let Some(subs) = tasks.get("subagents").and_then(|v| v.as_array()) {
                                 if !subs.is_empty() {
-                                    let ids: Vec<&str> = subs.iter()
+                                    let ids: Vec<&str> = subs
+                                        .iter()
                                         .filter_map(|s| s.get("agent_id").and_then(|v| v.as_str()))
                                         .collect();
                                     bail!(
@@ -1661,7 +1691,11 @@ impl HcomDb {
     ) -> Result<()> {
         let now = now_epoch_f64();
         // Normalize empty string to NULL
-        let sid: Option<&str> = if session_id.is_empty() { None } else { Some(session_id) };
+        let sid: Option<&str> = if session_id.is_empty() {
+            None
+        } else {
+            Some(session_id)
+        };
         self.conn.execute(
             "INSERT OR REPLACE INTO process_bindings (process_id, session_id, instance_name, updated_at)
              VALUES (?, ?, ?, ?)",
@@ -1678,8 +1712,6 @@ impl HcomDb {
         )?;
         Ok(())
     }
-
-    // ==================== Event Operations ====================
 
     /// Insert event and return its ID. Calls subscription check inline.
     pub fn log_event(
@@ -1726,8 +1758,7 @@ impl HcomDb {
     ) -> Result<Vec<serde_json::Value>> {
         let mut query =
             "SELECT id, timestamp, type, instance, data FROM events WHERE id > ?".to_string();
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-            vec![Box::new(last_event_id)];
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(last_event_id)];
 
         if let Some(et) = event_type {
             query.push_str(" AND type = ?");
@@ -1777,8 +1808,6 @@ impl HcomDb {
             .unwrap_or(0)
     }
 
-    // ==================== Subscription System ====================
-
     /// Check subscriptions and send matching notifications.
     /// Called inline from log_event(). Errors logged, never propagated.
     fn check_event_subscriptions(
@@ -1820,11 +1849,7 @@ impl HcomDb {
                     })
                     .unwrap_or_default();
                 if !msg_sender.is_empty() && !msg_delivered_to.is_empty() {
-                    self.cancel_request_watches_by_flow(
-                        msg_sender,
-                        &msg_delivered_to,
-                        reply_to_id,
-                    );
+                    self.cancel_request_watches_by_flow(msg_sender, &msg_delivered_to, reply_to_id);
                 }
             }
 
@@ -1911,7 +1936,10 @@ impl HcomDb {
             }
 
             // Request-watch delivery gate + reply guard
-            let sub_filters = sub.get("filters").cloned().unwrap_or(serde_json::Value::Null);
+            let sub_filters = sub
+                .get("filters")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             if sub_filters.get("request_watch").is_some() {
                 let request_id = sub_filters
                     .get("request_id")
@@ -1938,11 +1966,19 @@ impl HcomDb {
                         match serde_json::to_string(&sub_mut) {
                             Ok(json) => {
                                 if let Err(e) = self.kv_set(key, Some(&json)) {
-                                    crate::log::log_error("db", "check_event_subscriptions.kv_set", &format!("{e}"));
+                                    crate::log::log_error(
+                                        "db",
+                                        "check_event_subscriptions.kv_set",
+                                        &format!("{e}"),
+                                    );
                                 }
                             }
                             Err(e) => {
-                                crate::log::log_error("db", "check_event_subscriptions.serialize", &format!("{e}"));
+                                crate::log::log_error(
+                                    "db",
+                                    "check_event_subscriptions.serialize",
+                                    &format!("{e}"),
+                                );
                             }
                         }
                         continue;
@@ -1969,7 +2005,11 @@ impl HcomDb {
                             .unwrap_or(false);
                         if already_replied {
                             if let Err(e) = self.kv_set(key, None) {
-                                crate::log::log_error("db", "check_event_subscriptions.kv_set_cleanup", &format!("{e}"));
+                                crate::log::log_error(
+                                    "db",
+                                    "check_event_subscriptions.kv_set_cleanup",
+                                    &format!("{e}"),
+                                );
                             }
                             continue;
                         }
@@ -1981,11 +2021,7 @@ impl HcomDb {
             // deleted it mid-loop while we're iterating a stale snapshot.
             let still_exists: bool = self
                 .conn
-                .query_row(
-                    "SELECT 1 FROM kv WHERE key = ?",
-                    params![key],
-                    |_| Ok(true),
-                )
+                .query_row("SELECT 1 FROM kv WHERE key = ?", params![key], |_| Ok(true))
                 .unwrap_or(false);
             if !still_exists {
                 continue;
@@ -1999,14 +2035,23 @@ impl HcomDb {
 
             let filters_opt = sub.get("filters");
             let notification = self.format_sub_notification(
-                sub_id, event_id, event_type, instance, data, filters_opt,
+                sub_id,
+                event_id,
+                event_type,
+                instance,
+                data,
+                filters_opt,
             );
             let _ = self.send_sub_notification(caller, &notification);
 
             // Update last_id or remove if --once
             if sub.get("once").and_then(|v| v.as_bool()).unwrap_or(false) {
                 if let Err(e) = self.kv_set(key, None) {
-                    crate::log::log_error("db", "check_event_subscriptions.kv_set_once", &format!("{e}"));
+                    crate::log::log_error(
+                        "db",
+                        "check_event_subscriptions.kv_set_once",
+                        &format!("{e}"),
+                    );
                 }
             } else {
                 let mut sub_mut = sub.clone();
@@ -2014,11 +2059,19 @@ impl HcomDb {
                 match serde_json::to_string(&sub_mut) {
                     Ok(json) => {
                         if let Err(e) = self.kv_set(key, Some(&json)) {
-                            crate::log::log_error("db", "check_event_subscriptions.kv_set_cursor", &format!("{e}"));
+                            crate::log::log_error(
+                                "db",
+                                "check_event_subscriptions.kv_set_cursor",
+                                &format!("{e}"),
+                            );
                         }
                     }
                     Err(e) => {
-                        crate::log::log_error("db", "check_event_subscriptions.serialize_cursor", &format!("{e}"));
+                        crate::log::log_error(
+                            "db",
+                            "check_event_subscriptions.serialize_cursor",
+                            &format!("{e}"),
+                        );
                     }
                 }
             }
@@ -2072,7 +2125,11 @@ impl HcomDb {
                     }
                 }
                 if let Err(e) = self.kv_set(key, None) {
-                    crate::log::log_error("db", "cancel_request_watches_by_flow.kv_set", &format!("{e}"));
+                    crate::log::log_error(
+                        "db",
+                        "cancel_request_watches_by_flow.kv_set",
+                        &format!("{e}"),
+                    );
                 }
             }
         }
@@ -2092,7 +2149,11 @@ impl HcomDb {
 
             if target == sender && req_id == reply_to_id {
                 if let Err(e) = self.kv_set(key, None) {
-                    crate::log::log_error("db", "cancel_request_watches_by_reply.kv_set", &format!("{e}"));
+                    crate::log::log_error(
+                        "db",
+                        "cancel_request_watches_by_reply.kv_set",
+                        &format!("{e}"),
+                    );
                 }
             }
         }
@@ -2116,10 +2177,7 @@ impl HcomDb {
                     .and_then(|v| v.as_i64())
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "?".to_string());
-                let target = f
-                    .get("target")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(instance);
+                let target = f.get("target").and_then(|v| v.as_str()).unwrap_or(instance);
                 let action = if event_type == "status" {
                     "went idle"
                 } else {
@@ -2133,12 +2191,8 @@ impl HcomDb {
 
             // Collision: custom format
             if f.get("collision").is_some() && event_type == "status" {
-                let file_path = data
-                    .get("detail")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
-                if let Some(partner) = self.find_collision_partner(event_id, instance, file_path)
-                {
+                let file_path = data.get("detail").and_then(|v| v.as_str()).unwrap_or("?");
+                if let Some(partner) = self.find_collision_partner(event_id, instance, file_path) {
                     return format!(
                         "\u{26a0}\u{fe0f} COLLISION [sub:{}] #{}: {} and {} both edited {}",
                         sub_id, event_id, instance, partner, file_path
@@ -2167,14 +2221,13 @@ impl HcomDb {
                     .to_string();
                 if text.len() > 60 {
                     let mut end = 57;
-                    while end > 0 && !text.is_char_boundary(end) { end -= 1; }
+                    while end > 0 && !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
                     text = format!("{}...", &text[..end]);
                 }
                 text = text.replace('@', "(at)");
-                let from = data
-                    .get("from")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
+                let from = data.get("from").and_then(|v| v.as_str()).unwrap_or("?");
                 parts.push(format!("from:{}", from));
                 parts.push(format!("\"{}\"", text));
             }
@@ -2192,10 +2245,16 @@ impl HcomDb {
                             if !detail.is_empty() {
                                 let truncated = if detail.len() > 40 {
                                     if ctx.contains("Bash") {
-                                        let end = (0..=37).rev().find(|&i| detail.is_char_boundary(i)).unwrap_or(0);
+                                        let end = (0..=37)
+                                            .rev()
+                                            .find(|&i| detail.is_char_boundary(i))
+                                            .unwrap_or(0);
                                         format!("{}...", &detail[..end])
                                     } else {
-                                        let start = (detail.len().saturating_sub(37)..=detail.len()).find(|&i| detail.is_char_boundary(i)).unwrap_or(detail.len());
+                                        let start = (detail.len().saturating_sub(37)
+                                            ..=detail.len())
+                                            .find(|&i| detail.is_char_boundary(i))
+                                            .unwrap_or(detail.len());
                                         format!("...{}", &detail[start..])
                                     }
                                 } else {
@@ -2282,7 +2341,9 @@ impl HcomDb {
     /// Parses @mentions, computes scope, inserts message event.
     pub fn send_system_message(&self, sender_name: &str, message: &str) -> Result<Vec<String>> {
         // Get all instances
-        let mut stmt = self.conn.prepare_cached("SELECT name, tag FROM instances")?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT name, tag FROM instances")?;
         let instances: Vec<(String, Option<String>)> = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
@@ -2350,8 +2411,6 @@ impl HcomDb {
         Ok(delivered_to)
     }
 
-    // ==================== Instance Operations ====================
-
     /// Get instance by name. Returns full row as JSON or None.
     /// Column list for instance SELECT queries. Must match instance_row_to_json index order.
     const INSTANCE_COLUMNS: &str =
@@ -2398,7 +2457,10 @@ impl HcomDb {
     }
 
     pub fn get_instance(&self, name: &str) -> Result<Option<serde_json::Value>> {
-        let sql = format!("SELECT {} FROM instances WHERE name = ?", Self::INSTANCE_COLUMNS);
+        let sql = format!(
+            "SELECT {} FROM instances WHERE name = ?",
+            Self::INSTANCE_COLUMNS
+        );
         let mut stmt = self.conn.prepare_cached(&sql)?;
 
         match stmt.query_row(params![name], Self::instance_row_to_json) {
@@ -2528,7 +2590,10 @@ impl HcomDb {
 
     /// Iterate all instances, returning Vec of JSON objects.
     pub fn iter_instances(&self) -> Result<Vec<serde_json::Value>> {
-        let sql = format!("SELECT {} FROM instances ORDER BY created_at DESC", Self::INSTANCE_COLUMNS);
+        let sql = format!(
+            "SELECT {} FROM instances ORDER BY created_at DESC",
+            Self::INSTANCE_COLUMNS
+        );
         let mut stmt = self.conn.prepare_cached(&sql)?;
 
         let rows: Vec<serde_json::Value> = stmt
@@ -2613,13 +2678,11 @@ impl HcomDb {
         Ok(())
     }
 
-    // ==================== Instance CRUD (full row) ====================
-
     /// Get full instance row by name.
     pub fn get_instance_full(&self, name: &str) -> Result<Option<InstanceRow>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT * FROM instances WHERE name = ?",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT * FROM instances WHERE name = ?")?;
         match stmt.query_row(params![name], InstanceRow::from_row) {
             Ok(row) => Ok(Some(row)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -2629,7 +2692,9 @@ impl HcomDb {
 
     /// Get all instance rows.
     pub fn iter_instances_full(&self) -> Result<Vec<InstanceRow>> {
-        let mut stmt = self.conn.prepare_cached("SELECT * FROM instances ORDER BY created_at DESC")?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT * FROM instances ORDER BY created_at DESC")?;
         let rows = stmt
             .query_map([], InstanceRow::from_row)?
             .filter_map(|r| r.ok())
@@ -2639,14 +2704,20 @@ impl HcomDb {
 
     /// Save (INSERT OR REPLACE) an instance row.
     /// Uses a JSON Value map for flexible field specification.
-    pub fn save_instance_named(&self, name: &str, data: &serde_json::Map<String, serde_json::Value>) -> Result<bool> {
+    pub fn save_instance_named(
+        &self,
+        name: &str,
+        data: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<bool> {
         // Build column list and values dynamically
         let mut cols = vec!["name"];
         let mut placeholders = vec!["?"];
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(name.to_string())];
 
         for (key, val) in data {
-            if key == "name" { continue; }
+            if key == "name" {
+                continue;
+            }
             cols.push(Self::validate_column(key)?);
             placeholders.push("?");
             values.push(Self::json_value_to_sql(val));
@@ -2665,8 +2736,14 @@ impl HcomDb {
 
     /// Update specific fields on an instance row.
     /// Uses a JSON Value map for flexible field specification.
-    pub fn update_instance_fields(&self, name: &str, updates: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
-        if updates.is_empty() { return Ok(()); }
+    pub fn update_instance_fields(
+        &self,
+        name: &str,
+        updates: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
 
         let mut set_parts = Vec::new();
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -2691,13 +2768,35 @@ impl HcomDb {
     /// Validate column name against SQL injection (whitelist of known columns).
     fn validate_column(key: &str) -> Result<&str> {
         const VALID_COLUMNS: &[&str] = &[
-            "name", "session_id", "parent_session_id", "parent_name", "agent_id",
-            "tag", "last_event_id", "last_stop", "status", "status_time",
-            "status_context", "status_detail", "directory", "created_at",
-            "transcript_path", "tool", "background", "background_log_file",
-            "tcp_mode", "wait_timeout", "subagent_timeout", "hints",
-            "origin_device_id", "pid", "launch_args", "launch_context",
-            "name_announced", "running_tasks", "idle_since",
+            "name",
+            "session_id",
+            "parent_session_id",
+            "parent_name",
+            "agent_id",
+            "tag",
+            "last_event_id",
+            "last_stop",
+            "status",
+            "status_time",
+            "status_context",
+            "status_detail",
+            "directory",
+            "created_at",
+            "transcript_path",
+            "tool",
+            "background",
+            "background_log_file",
+            "tcp_mode",
+            "wait_timeout",
+            "subagent_timeout",
+            "hints",
+            "origin_device_id",
+            "pid",
+            "launch_args",
+            "launch_context",
+            "name_announced",
+            "running_tasks",
+            "idle_since",
         ];
         if VALID_COLUMNS.contains(&key) {
             Ok(key)
@@ -2735,12 +2834,11 @@ impl HcomDb {
             )
             .is_ok()
     }
-
 }
 
 /// Generate ISO timestamp for current time.
 fn chrono_now_iso() -> String {
-    crate::shared::constants::now_iso()
+    crate::shared::time::now_iso()
 }
 
 /// Parse ISO 8601 timestamp to epoch seconds using chrono
@@ -3008,8 +3106,6 @@ mod tests {
         cleanup_test_db(db_path);
     }
 
-    // ==================== Full Schema Tests ====================
-
     /// Create a test DB with full init_db() schema
     fn setup_full_test_db() -> (HcomDb, PathBuf) {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -3147,11 +3243,14 @@ mod tests {
         let (db, db_path) = setup_full_test_db();
         match db.check_schema_compat().unwrap() {
             SchemaCompat::Ok => {} // expected
-            other => panic!("Expected SchemaCompat::Ok, got {:?}", match other {
-                SchemaCompat::NeedsArchive(r) => format!("NeedsArchive({})", r),
-                SchemaCompat::StaleProcess => "StaleProcess".to_string(),
-                SchemaCompat::Ok => unreachable!(),
-            }),
+            other => panic!(
+                "Expected SchemaCompat::Ok, got {:?}",
+                match other {
+                    SchemaCompat::NeedsArchive(r) => format!("NeedsArchive({})", r),
+                    SchemaCompat::StaleProcess => "StaleProcess".to_string(),
+                    SchemaCompat::Ok => unreachable!(),
+                }
+            ),
         }
         cleanup_test_db(db_path);
     }
@@ -3278,8 +3377,6 @@ mod tests {
         cleanup_test_db(db_path);
     }
 
-    // ==================== KV Store Tests ====================
-
     #[test]
     fn test_kv_get_set() {
         let (db, db_path) = setup_full_test_db();
@@ -3326,8 +3423,6 @@ mod tests {
 
         cleanup_test_db(db_path);
     }
-
-    // ==================== Session Bindings Tests ====================
 
     #[test]
     fn test_session_binding_crud() {
@@ -3385,10 +3480,12 @@ mod tests {
         // Try binding same session to nova - should fail
         let result = db.set_session_binding("sess-1", "nova");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("already bound to luna"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("already bound to luna")
+        );
 
         cleanup_test_db(db_path);
     }
@@ -3442,8 +3539,6 @@ mod tests {
 
         cleanup_test_db(db_path);
     }
-
-    // ==================== Log Event Tests ====================
 
     #[test]
     fn test_log_event_returns_id() {
@@ -3500,8 +3595,6 @@ mod tests {
         cleanup_test_db(db_path);
     }
 
-    // ==================== Subscription System Tests ====================
-
     #[test]
     fn test_subscription_recursion_guard_sys_prefix() {
         let (db, db_path) = setup_full_test_db();
@@ -3518,8 +3611,7 @@ mod tests {
 
         // Log event from sys_ instance - should NOT trigger subscription
         let data = serde_json::json!({"from": "[hcom-events]", "text": "test"});
-        db.log_event("message", "sys_[hcom-events]", &data)
-            .unwrap();
+        db.log_event("message", "sys_[hcom-events]", &data).unwrap();
 
         // Sub should not be updated (last_id should still be 0)
         let sub_after = db.kv_get("events_sub:test").unwrap().unwrap();
@@ -3707,18 +3799,11 @@ mod tests {
                 "request_id": 42
             }
         });
-        db.kv_set(
-            "events_sub:reqwatch-test",
-            Some(&reqwatch.to_string()),
-        )
-        .unwrap();
+        db.kv_set("events_sub:reqwatch-test", Some(&reqwatch.to_string()))
+            .unwrap();
 
         // Simulate responder replying to requester with reply_to matching request_id
-        db.cancel_request_watches_by_flow(
-            "responder",
-            &["requester".to_string()],
-            Some(42),
-        );
+        db.cancel_request_watches_by_flow("responder", &["requester".to_string()], Some(42));
 
         // Subscription should be deleted
         assert!(
@@ -3752,18 +3837,11 @@ mod tests {
                 "request_id": 42
             }
         });
-        db.kv_set(
-            "events_sub:reqwatch-test2",
-            Some(&reqwatch.to_string()),
-        )
-        .unwrap();
+        db.kv_set("events_sub:reqwatch-test2", Some(&reqwatch.to_string()))
+            .unwrap();
 
         // Reply with wrong request_id — should NOT cancel
-        db.cancel_request_watches_by_flow(
-            "responder",
-            &["requester".to_string()],
-            Some(99),
-        );
+        db.cancel_request_watches_by_flow("responder", &["requester".to_string()], Some(99));
 
         assert!(
             db.kv_get("events_sub:reqwatch-test2").unwrap().is_some(),
@@ -3872,12 +3950,13 @@ mod tests {
         // Sub should not be updated
         let sub_after = db.kv_get("events_sub:test").unwrap().unwrap();
         let sub_val: serde_json::Value = serde_json::from_str(&sub_after).unwrap();
-        assert_eq!(sub_val["last_id"], 0, "[hcom-events] sender should be blocked by guard B");
+        assert_eq!(
+            sub_val["last_id"], 0,
+            "[hcom-events] sender should be blocked by guard B"
+        );
 
         cleanup_test_db(db_path);
     }
-
-    // ==================== Send System Message Tests ====================
 
     #[test]
     fn test_send_system_message_broadcast() {
@@ -3955,8 +4034,6 @@ mod tests {
         cleanup_test_db(db_path);
     }
 
-    // ==================== Instance CRUD Tests ====================
-
     #[test]
     fn test_save_and_get_instance() {
         let (db, db_path) = setup_full_test_db();
@@ -4027,8 +4104,6 @@ mod tests {
         cleanup_test_db(db_path);
     }
 
-    // ==================== Process Binding Tests ====================
-
     #[test]
     fn test_process_binding_crud() {
         let (db, db_path) = setup_full_test_db();
@@ -4041,8 +4116,7 @@ mod tests {
             .unwrap();
 
         // Set process binding
-        db.set_process_binding("pid-123", "sess-1", "luna")
-            .unwrap();
+        db.set_process_binding("pid-123", "sess-1", "luna").unwrap();
         assert!(db.has_process_binding_for_instance("luna"));
 
         // Get binding

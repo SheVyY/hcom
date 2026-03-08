@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::net::TcpListener;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::core::filters::{EventFilterArgs, build_sql_from_flags, resolve_filter_names};
 use crate::core::launch_status::wait_for_launch;
@@ -46,6 +46,7 @@ pub struct EventsArgs {
 }
 
 #[derive(clap::Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum EventsSubcmd {
     /// Subscribe to events
     Sub(EventsSubArgs),
@@ -94,10 +95,7 @@ pub struct EventsLaunchArgs {
 ///
 /// Preserves fields used in active filters.
 pub fn streamline_event(event: &Value, filters: &HashMap<String, Vec<String>>) -> Value {
-    let mut data = event
-        .get("data")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let mut data = event.get("data").cloned().unwrap_or_else(|| json!({}));
 
     if let Some(obj) = data.as_object_mut() {
         // Drop universal bloat
@@ -108,10 +106,7 @@ pub fn streamline_event(event: &Value, filters: &HashMap<String, Vec<String>>) -
             obj.remove("mentions");
         }
 
-        let event_type = event
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
         match event_type {
             "message" => {
@@ -122,7 +117,10 @@ pub fn streamline_event(event: &Value, filters: &HashMap<String, Vec<String>>) -
                 if !filters.contains_key("cmd") && !filters.contains_key("file") {
                     if let Some(detail) = obj.get("detail").and_then(|v| v.as_str()) {
                         if detail.len() > 60 {
-                            let end = (0..=60).rev().find(|&i| detail.is_char_boundary(i)).unwrap_or(0);
+                            let end = (0..=60)
+                                .rev()
+                                .find(|&i| detail.is_char_boundary(i))
+                                .unwrap_or(0);
                             let truncated = format!("{}...", &detail[..end]);
                             obj.insert("detail".into(), json!(truncated));
                         }
@@ -138,10 +136,7 @@ pub fn streamline_event(event: &Value, filters: &HashMap<String, Vec<String>>) -
     }
 
     // Truncate timestamp to 19 chars (remove microseconds)
-    let ts = event
-        .get("ts")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let ts = event.get("ts").and_then(|v| v.as_str()).unwrap_or("");
     let ts_truncated = if ts.len() > 19 { &ts[..19] } else { ts };
 
     json!({
@@ -162,9 +157,8 @@ fn query_events(
     last_n: usize,
     params: &[&dyn rusqlite::types::ToSql],
 ) -> Result<Vec<Value>, String> {
-    let query = format!(
-        "SELECT * FROM events_v WHERE 1=1{filter_query} ORDER BY id DESC LIMIT {last_n}"
-    );
+    let query =
+        format!("SELECT * FROM events_v WHERE 1=1{filter_query} ORDER BY id DESC LIMIT {last_n}");
 
     let mut stmt = db
         .conn()
@@ -252,14 +246,23 @@ fn events_sub_list(db: &HcomDb) -> i32 {
         let filter_display = if let Some(filters) = sub.get("filters") {
             let s = filters.to_string();
             if s.len() > 35 {
-                { let end = (0..=35).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0); format!("{}...", &s[..end]) }
+                {
+                    let end = (0..=35).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0);
+                    format!("{}...", &s[..end])
+                }
             } else {
                 s
             }
         } else {
             let sql = sub.get("sql").and_then(|v| v.as_str()).unwrap_or("");
             if sql.len() > 35 {
-                { let end = (0..=35).rev().find(|&i| sql.is_char_boundary(i)).unwrap_or(0); format!("{}...", &sql[..end]) }
+                {
+                    let end = (0..=35)
+                        .rev()
+                        .find(|&i| sql.is_char_boundary(i))
+                        .unwrap_or(0);
+                    format!("{}...", &sql[..end])
+                }
             } else {
                 sql.to_string()
             }
@@ -302,11 +305,15 @@ pub(crate) fn create_filter_subscription(
     let mut sql = match build_sql_from_flags(filters) {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => {
-            if !silent { eprintln!("Error: No valid filters provided"); }
+            if !silent {
+                eprintln!("Error: No valid filters provided");
+            }
             return 1;
         }
         Err(e) => {
-            if !silent { eprintln!("Error: Filter error: {e}"); }
+            if !silent {
+                eprintln!("Error: Filter error: {e}");
+            }
             return 1;
         }
     };
@@ -339,11 +346,13 @@ pub(crate) fn create_filter_subscription(
 
     // Check duplicate
     if db.kv_get(&sub_key).ok().flatten().is_some() {
-        if !silent { println!("Subscription {sub_id} already exists"); }
+        if !silent {
+            println!("Subscription {sub_id} already exists");
+        }
         return 0;
     }
 
-    let now = crate::shared::constants::now_epoch_f64();
+    let now = crate::shared::time::now_epoch_f64();
     let last_id = db.get_last_event_id();
 
     let sub_data = json!({
@@ -380,12 +389,7 @@ pub(crate) fn create_filter_subscription(
 }
 
 /// Create a raw SQL subscription.
-fn events_sub_sql(
-    db: &HcomDb,
-    sql_parts: &[String],
-    caller: &str,
-    once: bool,
-) -> i32 {
+fn events_sub_sql(db: &HcomDb, sql_parts: &[String], caller: &str, once: bool) -> i32 {
     let sql = sql_parts.join(" ").replace("\\!", "!");
 
     // Validate SQL
@@ -397,7 +401,7 @@ fn events_sub_sql(
         return 1;
     }
 
-    let now = crate::shared::constants::now_epoch_f64();
+    let now = crate::shared::time::now_epoch_f64();
 
     // Generate ID
     let hash = sha256_hash(&format!("{caller}{sql}{now}"));
@@ -468,7 +472,10 @@ fn cmd_events_sub(db: &HcomDb, args: &EventsSubArgs, caller_name: Option<&str>) 
     resolve_filter_names(&mut filters, db);
 
     let once = args.once;
-    let target_instance = args.for_agent.clone();
+    let target_instance = args
+        .for_agent
+        .as_deref()
+        .map(|name| crate::instances::resolve_display_name(db, name).unwrap_or_else(|| name.to_string()));
     let sql_parts: Vec<String> = args.rest.clone();
 
     // Resolve caller
@@ -596,13 +603,12 @@ fn cmd_events_launch(db: &HcomDb, args: &EventsLaunchArgs, instance_name: Option
 
     let result = wait_for_launch(db, launcher.as_deref(), batch_id, timeout);
     let result_json = result.to_json();
-    println!("{}", serde_json::to_string(&result_json).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string(&result_json).unwrap_or_default()
+    );
 
-    if result_json
-        .get("status")
-        .and_then(|v| v.as_str())
-        == Some("ready")
-    {
+    if result_json.get("status").and_then(|v| v.as_str()) == Some("ready") {
         0
     } else {
         1
@@ -623,7 +629,7 @@ fn events_wait(
     use std::time::Instant;
 
     // Quick lookback: check last 10s for already-matching events
-    let now_ts = crate::shared::constants::now_epoch_i64() - 10;
+    let now_ts = crate::shared::time::now_epoch_i64() - 10;
     let lookback_ts = chrono::DateTime::from_timestamp(now_ts, 0)
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_default();
@@ -674,9 +680,7 @@ fn events_wait(
         }
 
         // Query for new matching events
-        let query = format!(
-            "SELECT * FROM events_v WHERE id > ?{filter_query} ORDER BY id"
-        );
+        let query = format!("SELECT * FROM events_v WHERE id > ?{filter_query} ORDER BY id");
         let mut found = false;
         match db.conn().prepare(&query) {
             Ok(mut stmt) => {
@@ -692,10 +696,7 @@ fn events_wait(
                             } else {
                                 streamline_event(&event, filters)
                             };
-                            println!(
-                                "{}",
-                                serde_json::to_string(&output).unwrap_or_default()
-                            );
+                            println!("{}", serde_json::to_string(&output).unwrap_or_default());
                             found = true;
                             break;
                         }
@@ -783,7 +784,7 @@ fn parse_event_row(row: &rusqlite::Row) -> Result<Value, rusqlite::Error> {
 
 /// SHA-256 hex hash
 fn sha256_hash(input: &str) -> String {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
@@ -799,13 +800,15 @@ fn build_message_preview(db: &HcomDb, instance_name: &str) -> String {
 
     // Build simple "sender → you" format
     let display_name = crate::instances::get_display_name(db, instance_name);
-    let senders: Vec<String> = messages.iter().map(|m| {
-        crate::instances::get_display_name(db, &m.from)
-    }).collect();
+    let senders: Vec<String> = messages
+        .iter()
+        .map(|m| crate::instances::get_display_name(db, &m.from))
+        .collect();
 
     // Deduplicate senders preserving order
     let mut seen = std::collections::HashSet::new();
-    let unique_senders: Vec<&str> = senders.iter()
+    let unique_senders: Vec<&str> = senders
+        .iter()
         .filter(|s| seen.insert(s.as_str()))
         .map(|s| s.as_str())
         .collect();
@@ -819,7 +822,10 @@ fn build_message_preview(db: &HcomDb, instance_name: &str) -> String {
     // Truncate if needed (max ~200 chars)
     let max_content = 200;
     if preview.len() > max_content {
-        let end = (0..=(max_content - 3)).rev().find(|&i| preview.is_char_boundary(i)).unwrap_or(0);
+        let end = (0..=(max_content - 3))
+            .rev()
+            .find(|&i| preview.is_char_boundary(i))
+            .unwrap_or(0);
         format!("<hcom>{}...</hcom>", &preview[..end])
     } else {
         format!("<hcom>{preview}</hcom>")
@@ -1171,7 +1177,8 @@ mod tests {
     #[test]
     fn test_events_args_with_filters() {
         use clap::Parser;
-        let args = EventsArgs::try_parse_from(["events", "--agent", "peso", "--type", "message"]).unwrap();
+        let args =
+            EventsArgs::try_parse_from(["events", "--agent", "peso", "--type", "message"]).unwrap();
         assert_eq!(args.filters.agent, vec!["peso"]);
         assert_eq!(args.filters.event_type, vec!["message"]);
         assert!(args.subcmd.is_none());
@@ -1180,7 +1187,8 @@ mod tests {
     #[test]
     fn test_events_sub_args() {
         use clap::Parser;
-        let args = EventsArgs::try_parse_from(["events", "sub", "--agent", "peso", "--once"]).unwrap();
+        let args =
+            EventsArgs::try_parse_from(["events", "sub", "--agent", "peso", "--once"]).unwrap();
         match args.subcmd {
             Some(EventsSubcmd::Sub(ref sub)) => {
                 assert!(sub.once);
@@ -1205,7 +1213,8 @@ mod tests {
     #[test]
     fn test_events_launch_args() {
         use clap::Parser;
-        let args = EventsArgs::try_parse_from(["events", "launch", "batch1", "--timeout", "60"]).unwrap();
+        let args =
+            EventsArgs::try_parse_from(["events", "launch", "batch1", "--timeout", "60"]).unwrap();
         match args.subcmd {
             Some(EventsSubcmd::Launch(ref launch)) => {
                 assert_eq!(launch.batch_id, Some("batch1".to_string()));

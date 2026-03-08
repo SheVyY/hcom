@@ -4,21 +4,16 @@
 //! Supports: message-wait mode, --timeout, --json, --sql filter mode.
 //! Uses TCP notify socket for instant wake on local messages.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::core::filters::{
-    EventFilterArgs, build_sql_from_flags, resolve_filter_names,
-};
+use crate::core::filters::{EventFilterArgs, build_sql_from_flags, resolve_filter_names};
 use crate::db::HcomDb;
 use crate::identity;
-use crate::instances::{self, get_display_name, set_status};
+use crate::instances::{self, StatusUpdate, get_display_name, set_status};
 use crate::notify::NotifyServer;
-use crate::shared::{
-    CommandContext,
-    ST_ACTIVE, ST_INACTIVE, ST_LISTENING,
-};
+use crate::shared::{CommandContext, ST_ACTIVE, ST_INACTIVE, ST_LISTENING};
 
 /// Parsed arguments for `hcom listen`.
 #[derive(clap::Parser, Debug)]
@@ -45,7 +40,7 @@ pub struct ListenArgs {
 /// Initialize heartbeat for the listening instance.
 /// Writes last_stop + wait_timeout to instances table
 fn init_heartbeat(db: &HcomDb, instance_name: &str, timeout: f64) {
-    let now = crate::shared::constants::now_epoch_i64();
+    let now = crate::shared::time::now_epoch_i64();
 
     let mut updates = serde_json::Map::new();
     updates.insert("last_stop".into(), serde_json::json!(now));
@@ -56,7 +51,7 @@ fn init_heartbeat(db: &HcomDb, instance_name: &str, timeout: f64) {
 /// Update heartbeat timestamp.
 /// Writes last_stop to instances table so stale-cleanup sees the agent as alive.
 fn update_heartbeat(db: &HcomDb, instance_name: &str) {
-    let now = crate::shared::constants::now_epoch_i64();
+    let now = crate::shared::time::now_epoch_i64();
 
     let mut updates = serde_json::Map::new();
     updates.insert("last_stop".into(), serde_json::json!(now));
@@ -64,21 +59,32 @@ fn update_heartbeat(db: &HcomDb, instance_name: &str) {
 }
 
 /// Format messages as JSON for model consumption.
-fn format_messages_json(db: &HcomDb, messages: &[crate::db::Message], instance_name: &str) -> String {
+fn format_messages_json(
+    db: &HcomDb,
+    messages: &[crate::db::Message],
+    instance_name: &str,
+) -> String {
     let recipient_display = get_display_name(db, instance_name);
 
     if messages.len() == 1 {
         let msg = &messages[0];
         let sender_display = get_display_name(db, &msg.from);
         let prefix = build_prefix(msg.intent.as_deref(), msg.thread.as_deref(), msg.event_id);
-        format!("{prefix} {sender_display} -> {recipient_display}: {}", msg.text)
+        format!(
+            "{prefix} {sender_display} -> {recipient_display}: {}",
+            msg.text
+        )
     } else {
         let parts: Vec<String> = messages
             .iter()
             .map(|msg| {
                 let sender_display = get_display_name(db, &msg.from);
-                let prefix = build_prefix(msg.intent.as_deref(), msg.thread.as_deref(), msg.event_id);
-                format!("{prefix} {sender_display} -> {recipient_display}: {}", msg.text)
+                let prefix =
+                    build_prefix(msg.intent.as_deref(), msg.thread.as_deref(), msg.event_id);
+                format!(
+                    "{prefix} {sender_display} -> {recipient_display}: {}",
+                    msg.text
+                )
             })
             .collect();
         format!("[{} new messages] | {}", parts.len(), parts.join(" | "))
@@ -113,14 +119,20 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
         } else {
             let name = explicit_name.or(c.explicit_name.as_deref());
             match identity::resolve_identity(db, name, None, None, None, None, None) {
-                Ok(id) => { let n = id.name.clone(); Ok((id, n)) }
-                Err(e) => Err(e)
+                Ok(id) => {
+                    let n = id.name.clone();
+                    Ok((id, n))
+                }
+                Err(e) => Err(e),
             }
         }
     } else {
         match identity::resolve_identity(db, explicit_name, None, None, None, None, None) {
-            Ok(id) => { let n = id.name.clone(); Ok((id, n)) }
-            Err(e) => Err(e)
+            Ok(id) => {
+                let n = id.name.clone();
+                Ok((id, n))
+            }
+            Err(e) => Err(e),
         }
     };
     let (identity, instance_name) = match resolve_result {
@@ -184,7 +196,6 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
         }
     };
 
-    // Get instance data
     let instance_data = identity.instance_data.as_ref();
     if instance_data.is_none() {
         eprintln!("Error: hcom not started for '{instance_name}'.");
@@ -199,12 +210,29 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
             let shutdown_flag = Arc::clone(&shutdown);
             let _ = signal_hook::flag::register(signal_hook::consts::SIGTERM, shutdown_flag);
         }
-        return listen_with_filter(db, filter, &instance_name, timeout, json_output, instance_data.unwrap(), &shutdown);
+        return listen_with_filter(
+            db,
+            filter,
+            &instance_name,
+            timeout,
+            json_output,
+            instance_data.unwrap(),
+            &shutdown,
+        );
     }
 
     // Standard message-wait mode
     // Mark as listening
-    set_status(db, &instance_name, ST_LISTENING, "ready", "cmd:listen", "", None, None);
+    set_status(
+        db,
+        &instance_name,
+        ST_LISTENING,
+        "ready",
+        StatusUpdate {
+            detail: "cmd:listen",
+            ..Default::default()
+        },
+    );
 
     let start_time = std::time::Instant::now();
 
@@ -217,7 +245,6 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
         let _ = db.upsert_notify_endpoint(&instance_name, "listen", port);
     }
 
-    // Initialize heartbeat
     init_heartbeat(db, &instance_name, timeout);
 
     // Setup SIGTERM handler for clean shutdown
@@ -228,7 +255,12 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
     }
 
     // Check if already disconnected
-    if db.get_instance_full(&instance_name).ok().flatten().is_none() {
+    if db
+        .get_instance_full(&instance_name)
+        .ok()
+        .flatten()
+        .is_none()
+    {
         eprintln!("[You have been disconnected from HCOM]");
         return 0;
     }
@@ -252,7 +284,13 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
     // Cleanup: clear cmd:listen detail if still set
     if let Ok(Some(current)) = db.get_instance_full(&instance_name) {
         if current.status_detail == "cmd:listen" {
-            set_status(db, &instance_name, ST_LISTENING, "ready", "", "", None, None);
+            set_status(
+                db,
+                &instance_name,
+                ST_LISTENING,
+                "ready",
+                Default::default(),
+            );
         }
     }
 
@@ -262,6 +300,7 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn listen_loop(
     db: &HcomDb,
     instance_name: &str,
@@ -285,7 +324,13 @@ fn listen_loop(
         if elapsed >= timeout {
             // Timeout
             if instance_data.get("tool").and_then(|v| v.as_str()) == Some("adhoc") {
-                set_status(db, instance_name, ST_INACTIVE, "exit:timeout", "", "", None, None);
+                set_status(
+                    db,
+                    instance_name,
+                    ST_INACTIVE,
+                    "exit:timeout",
+                    Default::default(),
+                );
             }
             if !json_output {
                 eprintln!("\n[Timeout: no messages after {timeout}s]");
@@ -296,7 +341,9 @@ fn listen_loop(
         // Check if instance was stopped externally
         if db.get_instance_full(instance_name).ok().flatten().is_none() {
             if !json_output {
-                eprintln!("\n[Disconnected: HCOM stopped for {instance_name}. Unless told otherwise, stop work and end your turn now]");
+                eprintln!(
+                    "\n[Disconnected: HCOM stopped for {instance_name}. Unless told otherwise, stop work and end your turn now]"
+                );
             }
             return 0;
         }
@@ -314,15 +361,42 @@ fn listen_loop(
             }
 
             // Set status based on tool type
-            let tool = instance_data.get("tool").and_then(|v| v.as_str()).unwrap_or("claude");
+            let tool = instance_data
+                .get("tool")
+                .and_then(|v| v.as_str())
+                .unwrap_or("claude");
             if tool == "adhoc" {
-                set_status(db, instance_name, ST_INACTIVE, "message received", "", "", None, None);
+                set_status(
+                    db,
+                    instance_name,
+                    ST_INACTIVE,
+                    "message received",
+                    Default::default(),
+                );
             } else if tool == "codex" {
-                let msg_ts = messages.last().and_then(|m| m.timestamp.as_deref()).unwrap_or("");
+                let msg_ts = messages
+                    .last()
+                    .and_then(|m| m.timestamp.as_deref())
+                    .unwrap_or("");
                 let from_display = get_display_name(db, &messages[0].from);
-                set_status(db, instance_name, ST_ACTIVE, &format!("deliver:{from_display}"), "", msg_ts, None, None);
+                set_status(
+                    db,
+                    instance_name,
+                    ST_ACTIVE,
+                    &format!("deliver:{from_display}"),
+                    StatusUpdate {
+                        msg_ts,
+                        ..Default::default()
+                    },
+                );
             } else {
-                set_status(db, instance_name, ST_ACTIVE, "finished listening", "", "", None, None);
+                set_status(
+                    db,
+                    instance_name,
+                    ST_ACTIVE,
+                    "finished listening",
+                    Default::default(),
+                );
             }
 
             if json_output {
@@ -350,7 +424,8 @@ fn listen_loop(
         }
 
         // Sync remote events via relay before waiting
-        let relay_enabled = crate::relay::is_relay_enabled(&crate::config::load_config_snapshot().core);
+        let relay_enabled =
+            crate::relay::is_relay_enabled(&crate::config::load_config_snapshot().core);
         if relay_enabled {
             crate::relay::relay_wait(remaining.min(25.0));
         }
@@ -393,7 +468,7 @@ fn listen_with_filter(
     }
 
     // Check for recent match (10s lookback)
-    let now_ts = crate::shared::constants::now_epoch_f64();
+    let now_ts = crate::shared::time::now_epoch_f64();
     let lookback_ts = chrono::DateTime::from_timestamp((now_ts - 10.0) as i64, 0)
         .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
         .unwrap_or_default();
@@ -428,7 +503,7 @@ fn listen_with_filter(
 
     // Create temp subscription — SHA256 over instance+filter+time to avoid collisions
     let sub_id = {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(format!("{instance_name}{sql_filter}{now_ts}").as_bytes());
         let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
@@ -437,7 +512,13 @@ fn listen_with_filter(
     let sub_key = format!("events_sub:{sub_id}");
 
     // Mark as listening BEFORE capturing last_id
-    set_status(db, instance_name, ST_LISTENING, &format!("filter:{sub_id}"), "", "", None, None);
+    set_status(
+        db,
+        instance_name,
+        ST_LISTENING,
+        &format!("filter:{sub_id}"),
+        Default::default(),
+    );
 
     let sub_data = serde_json::json!({
         "id": sub_id,
@@ -482,6 +563,7 @@ fn listen_with_filter(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn filter_listen_loop(
     db: &HcomDb,
     instance_name: &str,
@@ -508,7 +590,13 @@ fn filter_listen_loop(
                 eprintln!("\n[Timeout: no match after {timeout}s]");
             }
             if instance_data.get("tool").and_then(|v| v.as_str()) == Some("adhoc") {
-                set_status(db, instance_name, ST_INACTIVE, "exit:timeout", "", "", None, None);
+                set_status(
+                    db,
+                    instance_name,
+                    ST_INACTIVE,
+                    "exit:timeout",
+                    Default::default(),
+                );
             }
             return 0;
         }
@@ -545,7 +633,13 @@ fn filter_listen_loop(
                     } else {
                         println!("\n{}", msg.text);
                     }
-                    set_status(db, instance_name, ST_ACTIVE, "filter matched", "", "", None, None);
+                    set_status(
+                        db,
+                        instance_name,
+                        ST_ACTIVE,
+                        "filter matched",
+                        Default::default(),
+                    );
                     return 0;
                 }
             }
@@ -565,11 +659,18 @@ fn filter_listen_loop(
                         println!("{}", serde_json::to_string(&j).unwrap_or_default());
                     }
                 } else {
-                    let owned: Vec<crate::db::Message> = real_messages.iter().map(|m| (*m).clone()).collect();
+                    let owned: Vec<crate::db::Message> =
+                        real_messages.iter().map(|m| (*m).clone()).collect();
                     let formatted = format_messages_json(db, &owned, instance_name);
                     println!("\n{formatted}");
                 }
-                set_status(db, instance_name, ST_ACTIVE, "message received", "", "", None, None);
+                set_status(
+                    db,
+                    instance_name,
+                    ST_ACTIVE,
+                    "message received",
+                    Default::default(),
+                );
                 return 0;
             }
         }
@@ -589,13 +690,14 @@ fn filter_listen_loop(
         // - With relay: relay_wait() did long-poll, short TCP check (1s)
         // - Local-only with TCP: select wakes on notification (30s)
         // - Local-only no TCP: must poll frequently (100ms)
-        let wait_time = if crate::relay::is_relay_enabled(&crate::config::load_config_snapshot().core) {
-            remaining.min(1.0)
-        } else if notify_server.is_some() {
-            remaining.min(30.0)
-        } else {
-            remaining.min(0.1)
-        };
+        let wait_time =
+            if crate::relay::is_relay_enabled(&crate::config::load_config_snapshot().core) {
+                remaining.min(1.0)
+            } else if notify_server.is_some() {
+                remaining.min(30.0)
+            } else {
+                remaining.min(0.1)
+            };
 
         if let Some(server) = notify_server {
             server.wait(Duration::from_secs_f64(wait_time));

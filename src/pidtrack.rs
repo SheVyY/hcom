@@ -1,12 +1,4 @@
 //! Track hcom-launched process PIDs for orphan detection and recovery.
-//!
-//! `~/.hcom/.tmp/launched_pids.json` so they survive DB resets.
-//! Auto-prunes dead PIDs on every read.
-//!
-//! Used by:
-//! - `list` (orphan detection)
-//! - `kill` (PID + pane lookup)
-//! - `start` (orphan recovery)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -91,7 +83,8 @@ fn pidfile_path(hcom_dir: &Path) -> PathBuf {
 }
 
 /// Check if a process is alive via `kill(pid, 0)`.
-fn is_alive(pid: u32) -> bool {
+/// Handles EPERM (process exists but owned by another user).
+pub fn is_alive(pid: u32) -> bool {
     // SAFETY: kill(pid, 0) is a no-op signal that just checks process existence.
     let ret = unsafe { libc::kill(pid as i32, 0) };
     if ret == 0 {
@@ -117,23 +110,71 @@ fn write_raw(hcom_dir: &Path, data: &HashMap<String, PidEntry>) {
     }
 }
 
+/// Parameters for recording a launched process.
+#[derive(Debug)]
+pub struct PidRecord<'a> {
+    pub hcom_dir: &'a Path,
+    pub pid: u32,
+    pub tool: &'a str,
+    pub name: &'a str,
+    pub directory: &'a str,
+    pub process_id: &'a str,
+    pub terminal_preset: &'a str,
+    pub pane_id: &'a str,
+    pub terminal_id: &'a str,
+    pub kitty_listen_on: &'a str,
+    pub session_id: &'a str,
+    pub notify_port: u16,
+    pub inject_port: u16,
+    pub tag: &'a str,
+}
+
+impl<'a> PidRecord<'a> {
+    /// Create with required fields, defaulting optional ones.
+    pub fn new(
+        hcom_dir: &'a Path,
+        pid: u32,
+        tool: &'a str,
+        name: &'a str,
+        directory: &'a str,
+    ) -> Self {
+        Self {
+            hcom_dir,
+            pid,
+            tool,
+            name,
+            directory,
+            process_id: "",
+            terminal_preset: "",
+            pane_id: "",
+            terminal_id: "",
+            kitty_listen_on: "",
+            session_id: "",
+            notify_port: 0,
+            inject_port: 0,
+            tag: "",
+        }
+    }
+}
+
 /// Record a launched process PID.
-pub fn record_pid(
-    hcom_dir: &Path,
-    pid: u32,
-    tool: &str,
-    name: &str,
-    directory: &str,
-    process_id: &str,
-    terminal_preset: &str,
-    pane_id: &str,
-    terminal_id: &str,
-    kitty_listen_on: &str,
-    session_id: &str,
-    notify_port: u16,
-    inject_port: u16,
-    tag: &str,
-) {
+pub fn record_pid(rec: &PidRecord<'_>) {
+    let PidRecord {
+        hcom_dir,
+        pid,
+        tool,
+        name,
+        directory,
+        process_id,
+        terminal_preset,
+        pane_id,
+        terminal_id,
+        kitty_listen_on,
+        session_id,
+        notify_port,
+        inject_port,
+        tag,
+    } = rec;
     let mut data = read_raw(hcom_dir);
     let key = pid.to_string();
 
@@ -161,11 +202,11 @@ pub fn record_pid(
         if !session_id.is_empty() && entry.session_id.is_empty() {
             entry.session_id = session_id.to_string();
         }
-        if notify_port != 0 && entry.notify_port == 0 {
-            entry.notify_port = notify_port;
+        if *notify_port != 0 && entry.notify_port == 0 {
+            entry.notify_port = *notify_port;
         }
-        if inject_port != 0 && entry.inject_port == 0 {
-            entry.inject_port = inject_port;
+        if *inject_port != 0 && entry.inject_port == 0 {
+            entry.inject_port = *inject_port;
         }
         if !tag.is_empty() && entry.tag.is_empty() {
             entry.tag = tag.to_string();
@@ -176,7 +217,7 @@ pub fn record_pid(
             PidEntry {
                 tool: tool.to_string(),
                 names: vec![name.to_string()],
-                launched_at: crate::shared::constants::now_epoch_f64(),
+                launched_at: crate::shared::time::now_epoch_f64(),
                 directory: directory.to_string(),
                 process_id: process_id.to_string(),
                 terminal_preset: terminal_preset.to_string(),
@@ -184,8 +225,8 @@ pub fn record_pid(
                 terminal_id: terminal_id.to_string(),
                 kitty_listen_on: kitty_listen_on.to_string(),
                 session_id: session_id.to_string(),
-                notify_port,
-                inject_port,
+                notify_port: *notify_port,
+                inject_port: *inject_port,
                 tag: tag.to_string(),
             },
         );
@@ -276,7 +317,7 @@ pub fn recover_single_orphan_to_db(
     use crate::instances;
     use crate::shared::constants::ST_LISTENING;
 
-    let now = crate::shared::constants::now_epoch_i64();
+    let now = crate::shared::time::now_epoch_i64();
 
     // Create instance row — this is the critical step; fail = abort recovery
     db.conn()
@@ -310,10 +351,7 @@ pub fn recover_single_orphan_to_db(
         db.rebind_session(&orphan.session_id, instance_name)
             .map_err(|e| format!("failed to rebind session: {}", e))?;
         let mut sid_update = serde_json::Map::new();
-        sid_update.insert(
-            "session_id".into(),
-            serde_json::json!(orphan.session_id),
-        );
+        sid_update.insert("session_id".into(), serde_json::json!(orphan.session_id));
         instances::update_instance_position(db, instance_name, &sid_update);
     }
 
@@ -328,12 +366,16 @@ pub fn recover_single_orphan_to_db(
     }
 
     // Set listening so PTY delivery gate allows message injection
-    instances::set_status(db, instance_name, ST_LISTENING, "recovered", "", "", None, None);
+    instances::set_status(
+        db,
+        instance_name,
+        ST_LISTENING,
+        "recovered",
+        Default::default(),
+    );
 
     Ok(())
 }
-
-// ==================== Tests ====================
 
 #[cfg(test)]
 mod tests {
@@ -342,19 +384,33 @@ mod tests {
 
     fn make_temp_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        // Create .tmp subdir so pidfile path works
         std::fs::create_dir_all(dir.path().join(".tmp")).unwrap();
         dir
+    }
+
+    fn rec<'a>(dir: &'a Path, pid: u32, tool: &'a str, name: &'a str) -> PidRecord<'a> {
+        PidRecord::new(dir, pid, tool, name, "/tmp")
     }
 
     #[test]
     fn test_record_and_read() {
         let dir = make_temp_dir();
-        record_pid(
-            dir.path(), 12345, "claude", "luna", "/tmp", "pid-1",
-            "kitty", "pane-1", "term-1", "/tmp/kitty.sock", "sess-1",
-            8080, 8081, "test-tag",
-        );
+        record_pid(&PidRecord {
+            hcom_dir: dir.path(),
+            pid: 12345,
+            tool: "claude",
+            name: "luna",
+            directory: "/tmp",
+            process_id: "pid-1",
+            terminal_preset: "kitty",
+            pane_id: "pane-1",
+            terminal_id: "term-1",
+            kitty_listen_on: "/tmp/kitty.sock",
+            session_id: "sess-1",
+            notify_port: 8080,
+            inject_port: 8081,
+            tag: "test-tag",
+        });
 
         let data = read_raw(dir.path());
         assert_eq!(data.len(), 1);
@@ -374,8 +430,8 @@ mod tests {
     #[test]
     fn test_record_appends_name() {
         let dir = make_temp_dir();
-        record_pid(dir.path(), 12345, "claude", "luna", "/tmp", "", "", "", "", "", "", 0, 0, "");
-        record_pid(dir.path(), 12345, "claude", "nova", "/tmp", "", "", "", "", "", "", 0, 0, "");
+        record_pid(&rec(dir.path(), 12345, "claude", "luna"));
+        record_pid(&rec(dir.path(), 12345, "claude", "nova"));
 
         let data = read_raw(dir.path());
         let entry = data.get("12345").unwrap();
@@ -385,8 +441,13 @@ mod tests {
     #[test]
     fn test_record_fills_empty_fields() {
         let dir = make_temp_dir();
-        record_pid(dir.path(), 12345, "claude", "luna", "/tmp", "", "", "", "", "", "", 0, 0, "");
-        record_pid(dir.path(), 12345, "claude", "luna", "/tmp", "pid-1", "kitty", "", "", "", "", 8080, 0, "");
+        record_pid(&rec(dir.path(), 12345, "claude", "luna"));
+        record_pid(&PidRecord {
+            process_id: "pid-1",
+            terminal_preset: "kitty",
+            notify_port: 8080,
+            ..rec(dir.path(), 12345, "claude", "luna")
+        });
 
         let data = read_raw(dir.path());
         let entry = data.get("12345").unwrap();
@@ -398,12 +459,19 @@ mod tests {
     #[test]
     fn test_record_does_not_overwrite_existing_fields() {
         let dir = make_temp_dir();
-        record_pid(dir.path(), 12345, "claude", "luna", "/tmp", "pid-1", "kitty", "", "", "", "", 0, 0, "");
-        record_pid(dir.path(), 12345, "claude", "luna", "/tmp", "pid-2", "wezterm", "", "", "", "", 0, 0, "");
+        record_pid(&PidRecord {
+            process_id: "pid-1",
+            terminal_preset: "kitty",
+            ..rec(dir.path(), 12345, "claude", "luna")
+        });
+        record_pid(&PidRecord {
+            process_id: "pid-2",
+            terminal_preset: "wezterm",
+            ..rec(dir.path(), 12345, "claude", "luna")
+        });
 
         let data = read_raw(dir.path());
         let entry = data.get("12345").unwrap();
-        // First values should be kept
         assert_eq!(entry.process_id, "pid-1");
         assert_eq!(entry.terminal_preset, "kitty");
     }
@@ -411,8 +479,8 @@ mod tests {
     #[test]
     fn test_remove_pid() {
         let dir = make_temp_dir();
-        record_pid(dir.path(), 12345, "claude", "luna", "/tmp", "", "", "", "", "", "", 0, 0, "");
-        record_pid(dir.path(), 67890, "gemini", "nova", "/tmp", "", "", "", "", "", "", 0, 0, "");
+        record_pid(&rec(dir.path(), 12345, "claude", "luna"));
+        record_pid(&rec(dir.path(), 67890, "gemini", "nova"));
 
         remove_pid(dir.path(), 12345);
         let data = read_raw(dir.path());
@@ -424,21 +492,18 @@ mod tests {
     #[test]
     fn test_remove_nonexistent_pid() {
         let dir = make_temp_dir();
-        record_pid(dir.path(), 12345, "claude", "luna", "/tmp", "", "", "", "", "", "", 0, 0, "");
-        remove_pid(dir.path(), 99999); // doesn't exist
+        record_pid(&rec(dir.path(), 12345, "claude", "luna"));
+        remove_pid(dir.path(), 99999);
         let data = read_raw(dir.path());
-        assert_eq!(data.len(), 1); // unchanged
+        assert_eq!(data.len(), 1);
     }
 
     #[test]
     fn test_orphan_prunes_dead_pids() {
         let dir = make_temp_dir();
-        // PID 1 is always alive (init/launchd), use it
-        // PID 99999999 is almost certainly dead
-        record_pid(dir.path(), 99999999, "claude", "dead", "/tmp", "", "", "", "", "", "", 0, 0, "");
+        record_pid(&rec(dir.path(), 99999999, "claude", "dead"));
 
         let orphans = get_orphan_processes(dir.path(), None);
-        // Should have pruned the dead PID
         let data = read_raw(dir.path());
         assert!(!data.contains_key("99999999"));
         assert!(orphans.iter().all(|o| o.pid != 99999999));
@@ -447,9 +512,8 @@ mod tests {
     #[test]
     fn test_orphan_active_pids_pruned() {
         let dir = make_temp_dir();
-        // Use our own PID (guaranteed alive)
         let our_pid = std::process::id();
-        record_pid(dir.path(), our_pid, "claude", "luna", "/tmp", "", "", "", "", "", "", 0, 0, "");
+        record_pid(&rec(dir.path(), our_pid, "claude", "luna"));
 
         let mut active = HashSet::new();
         active.insert(our_pid);
@@ -503,7 +567,9 @@ mod tests {
         };
 
         let result = recover_single_orphan_to_db(&db, &orphan, "luna");
-        assert!(result.is_err(), "expected error when DB has no instances table");
+        assert!(
+            result.is_err(),
+            "expected error when DB has no instances table"
+        );
     }
-
 }

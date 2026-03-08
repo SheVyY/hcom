@@ -62,7 +62,7 @@ fn cmd_hooks_status() -> i32 {
 }
 
 /// Add hooks for specified tool(s).
-fn cmd_hooks_add(argv: &[&str]) -> i32 {
+fn cmd_hooks_add(argv: &[String]) -> i32 {
     // Get auto_approve from config
     let include_permissions = crate::config::load_config_snapshot().core.auto_approve;
 
@@ -77,51 +77,95 @@ fn cmd_hooks_add(argv: &[&str]) -> i32 {
         }
     } else if argv[0] == "all" {
         HOOK_TOOLS.to_vec()
-    } else if HOOK_TOOLS.contains(&argv[0]) {
-        vec![argv[0]]
+    } else if HOOK_TOOLS.contains(&argv[0].as_str()) {
+        vec![argv[0].as_str()]
     } else {
         eprintln!("Error: Unknown tool: {}", argv[0]);
         eprintln!("Valid options: claude, gemini, codex, opencode, all");
         return 1;
     };
 
+    // Check current status before installing
+    let pre_status = get_tool_status();
+
     // Install hooks — propagate error detail where available
-    let mut results: Vec<(&str, bool, Option<String>)> = Vec::new();
+    // Outcome: "already" = was already installed, "added" = newly added, "failed" = error
+    enum AddResult {
+        Already,
+        Added,
+        Failed(Option<String>),
+    }
+    let mut results: Vec<(&str, AddResult)> = Vec::new();
     for tool in &tools {
-        let (success, err) = match *tool {
-            "claude" => (crate::hooks::claude::setup_claude_hooks(include_permissions), None),
-            "gemini" => (crate::hooks::gemini::setup_gemini_hooks(include_permissions), None),
-            "codex" => (crate::hooks::codex::setup_codex_hooks(include_permissions), None),
+        let already = pre_status
+            .iter()
+            .find(|(t, _, _)| t == tool)
+            .map(|(_, installed, _)| *installed)
+            .unwrap_or(false);
+        if already {
+            results.push((tool, AddResult::Already));
+            continue;
+        }
+        let outcome = match *tool {
+            "claude" => {
+                if crate::hooks::claude::setup_claude_hooks(include_permissions) {
+                    AddResult::Added
+                } else {
+                    AddResult::Failed(None)
+                }
+            }
+            "gemini" => {
+                if crate::hooks::gemini::setup_gemini_hooks(include_permissions) {
+                    AddResult::Added
+                } else {
+                    AddResult::Failed(None)
+                }
+            }
+            "codex" => {
+                if crate::hooks::codex::setup_codex_hooks(include_permissions) {
+                    AddResult::Added
+                } else {
+                    AddResult::Failed(None)
+                }
+            }
             "opencode" => match crate::hooks::opencode::install_opencode_plugin() {
-                Ok(v) => (v, None),
-                Err(e) => (false, Some(e.to_string())),
+                Ok(true) => AddResult::Added,
+                Ok(false) => AddResult::Failed(None),
+                Err(e) => AddResult::Failed(Some(e.to_string())),
             },
-            _ => (false, None),
+            _ => AddResult::Failed(None),
         };
-        results.push((tool, success, err));
+        results.push((tool, outcome));
     }
 
     // Report results
-    let success_count = results.iter().filter(|(_, ok, _)| *ok).count();
-    let fail_count = results.len() - success_count;
-
-    let status = get_tool_status();
-    for (tool, success, err) in &results {
-        let path = status
+    let post_status = get_tool_status();
+    let mut added_count = 0;
+    let mut fail_count = 0;
+    for (tool, outcome) in &results {
+        let path = post_status
             .iter()
             .find(|(t, _, _)| t == tool)
             .map(|(_, _, p)| p.as_str())
             .unwrap_or("");
-        if *success {
-            println!("Added {tool} hooks  ({path})");
-        } else if let Some(e) = err {
-            eprintln!("Failed to add {tool} hooks: {e}");
-        } else {
-            eprintln!("Failed to add {tool} hooks");
+        match outcome {
+            AddResult::Already => println!("{tool} hooks already installed  ({path})"),
+            AddResult::Added => {
+                println!("Added {tool} hooks  ({path})");
+                added_count += 1;
+            }
+            AddResult::Failed(Some(e)) => {
+                eprintln!("Failed to add {tool} hooks: {e}");
+                fail_count += 1;
+            }
+            AddResult::Failed(None) => {
+                eprintln!("Failed to add {tool} hooks");
+                fail_count += 1;
+            }
         }
     }
 
-    if success_count > 0 {
+    if added_count > 0 {
         println!();
         if tools.len() == 1 {
             let tool_name = match tools[0] {
@@ -141,46 +185,87 @@ fn cmd_hooks_add(argv: &[&str]) -> i32 {
 }
 
 /// Remove hooks for specified tool(s). Called from both `hcom hooks remove` and `hcom reset hooks`.
-pub fn cmd_hooks_remove(argv: &[&str]) -> i32 {
+pub fn cmd_hooks_remove(argv: &[String]) -> i32 {
     // Determine which tools to remove
     let tools: Vec<&str> = if argv.is_empty() || (argv.len() == 1 && argv[0] == "all") {
         HOOK_TOOLS.to_vec()
-    } else if HOOK_TOOLS.contains(&argv[0]) {
-        vec![argv[0]]
+    } else if HOOK_TOOLS.contains(&argv[0].as_str()) {
+        vec![argv[0].as_str()]
     } else {
         eprintln!("Error: Unknown tool: {}", argv[0]);
         eprintln!("Valid options: claude, gemini, codex, opencode, all");
         return 1;
     };
 
+    // Check current status before removing
+    let pre_status = get_tool_status();
+
     // Remove hooks — propagate error detail where available
-    let mut results: Vec<(&str, bool, Option<String>)> = Vec::new();
+    // Outcome: "already" = was not installed, "removed" = newly removed, "failed" = error
+    enum RemoveResult {
+        AlreadyRemoved,
+        Removed,
+        Failed(Option<String>),
+    }
+    let mut results: Vec<(&str, RemoveResult)> = Vec::new();
     for tool in &tools {
-        let (success, err) = match *tool {
-            "claude" => (crate::hooks::claude::remove_claude_hooks(), None),
-            "gemini" => (crate::hooks::gemini::remove_gemini_hooks(), None),
-            "codex" => (crate::hooks::codex::remove_codex_hooks(), None),
+        let installed = pre_status
+            .iter()
+            .find(|(t, _, _)| t == tool)
+            .map(|(_, installed, _)| *installed)
+            .unwrap_or(false);
+        if !installed {
+            results.push((tool, RemoveResult::AlreadyRemoved));
+            continue;
+        }
+        let outcome = match *tool {
+            "claude" => {
+                if crate::hooks::claude::remove_claude_hooks() {
+                    RemoveResult::Removed
+                } else {
+                    RemoveResult::Failed(None)
+                }
+            }
+            "gemini" => {
+                if crate::hooks::gemini::remove_gemini_hooks() {
+                    RemoveResult::Removed
+                } else {
+                    RemoveResult::Failed(None)
+                }
+            }
+            "codex" => {
+                if crate::hooks::codex::remove_codex_hooks() {
+                    RemoveResult::Removed
+                } else {
+                    RemoveResult::Failed(None)
+                }
+            }
             "opencode" => match crate::hooks::opencode::remove_opencode_plugin() {
-                Ok(()) => (true, None),
-                Err(e) => (false, Some(e.to_string())),
+                Ok(()) => RemoveResult::Removed,
+                Err(e) => RemoveResult::Failed(Some(e.to_string())),
             },
-            _ => (false, None),
+            _ => RemoveResult::Failed(None),
         };
-        results.push((tool, success, err));
+        results.push((tool, outcome));
     }
 
     // Report results
-    for (tool, success, err) in &results {
-        if *success {
-            println!("Removed {tool} hooks");
-        } else if let Some(e) = err {
-            eprintln!("Failed to remove {tool} hooks: {e}");
-        } else {
-            eprintln!("Failed to remove {tool} hooks");
+    let mut fail_count = 0;
+    for (tool, outcome) in &results {
+        match outcome {
+            RemoveResult::AlreadyRemoved => println!("{tool} hooks already removed"),
+            RemoveResult::Removed => println!("Removed {tool} hooks"),
+            RemoveResult::Failed(Some(e)) => {
+                eprintln!("Failed to remove {tool} hooks: {e}");
+                fail_count += 1;
+            }
+            RemoveResult::Failed(None) => {
+                eprintln!("Failed to remove {tool} hooks");
+                fail_count += 1;
+            }
         }
     }
 
-    let fail_count = results.iter().filter(|(_, ok, _)| !*ok).count();
     if fail_count > 0 { 1 } else { 0 }
 }
 
@@ -217,7 +302,7 @@ pub fn cmd_hooks(_db: &HcomDb, args: &HooksArgs, _ctx: Option<&CommandContext>) 
         return 0;
     }
 
-    let sub_argv: Vec<&str> = argv[1..].iter().map(|s| s.as_str()).collect();
+    let sub_argv = argv[1..].to_vec();
 
     match first {
         "status" => cmd_hooks_status(),

@@ -336,6 +336,7 @@ impl ScreenTracker {
             Ok(Tool::Gemini) => self.get_gemini_input_text(),
             Ok(Tool::Codex) => self.get_codex_input_text(),
             Ok(Tool::OpenCode) => None, // OpenCode: plugin handles delivery, no PTY input detection needed
+            Ok(Tool::Adhoc) => None,
             Err(_) => None,
         }
     }
@@ -537,8 +538,6 @@ impl ScreenTracker {
 
         None // Prompt not found
     }
-
-    // ==================== Debug Methods ====================
 
     /// Check and perform periodic dump if 5 seconds elapsed
     /// Returns true if dump was performed

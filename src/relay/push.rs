@@ -3,9 +3,9 @@
 //! Batches up to 100 events per publish with a 10s drain budget.
 //! Tracks progress via KV cursor `relay_last_push_id`.
 
-use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::Client;
-use serde_json::{json, Value};
+use rumqttc::v5::mqttbytes::QoS;
+use serde_json::{Value, json};
 use std::time::Instant;
 
 use crate::db::HcomDb;
@@ -29,23 +29,23 @@ pub fn build_state(db: &HcomDb) -> Value {
             let rows: Vec<_> = stmt
                 .query_map([], |row| {
                     Ok((
-                        row.get::<_, String>(0)?,           // name
-                        row.get::<_, Option<String>>(1)?,   // status
-                        row.get::<_, Option<String>>(2)?,   // status_context
-                        row.get::<_, Option<String>>(3)?,   // status_detail
-                        row.get::<_, Option<f64>>(4)?,      // status_time
-                        row.get::<_, Option<String>>(5)?,   // parent_name
-                        row.get::<_, Option<String>>(6)?,   // session_id
-                        row.get::<_, Option<String>>(7)?,   // parent_session_id
-                        row.get::<_, Option<String>>(8)?,   // agent_id
-                        row.get::<_, Option<String>>(9)?,   // directory
-                        row.get::<_, Option<String>>(10)?,  // transcript_path
-                        row.get::<_, Option<i64>>(11)?,     // wait_timeout
-                        row.get::<_, Option<f64>>(12)?,     // last_stop
-                        row.get::<_, Option<bool>>(13)?,    // tcp_mode
-                        row.get::<_, Option<String>>(14)?,  // tag
-                        row.get::<_, Option<String>>(15)?,  // tool
-                        row.get::<_, Option<bool>>(16)?,    // background
+                        row.get::<_, String>(0)?,          // name
+                        row.get::<_, Option<String>>(1)?,  // status
+                        row.get::<_, Option<String>>(2)?,  // status_context
+                        row.get::<_, Option<String>>(3)?,  // status_detail
+                        row.get::<_, Option<f64>>(4)?,     // status_time
+                        row.get::<_, Option<String>>(5)?,  // parent_name
+                        row.get::<_, Option<String>>(6)?,  // session_id
+                        row.get::<_, Option<String>>(7)?,  // parent_session_id
+                        row.get::<_, Option<String>>(8)?,  // agent_id
+                        row.get::<_, Option<String>>(9)?,  // directory
+                        row.get::<_, Option<String>>(10)?, // transcript_path
+                        row.get::<_, Option<i64>>(11)?,    // wait_timeout
+                        row.get::<_, Option<f64>>(12)?,    // last_stop
+                        row.get::<_, Option<bool>>(13)?,   // tcp_mode
+                        row.get::<_, Option<String>>(14)?, // tag
+                        row.get::<_, Option<String>>(15)?, // tool
+                        row.get::<_, Option<bool>>(16)?,   // background
                     ))
                 })
                 .ok()
@@ -202,7 +202,7 @@ pub fn push(
     let publish_ms = t0.elapsed().as_millis();
 
     // Advance cursor after publish enqueued (rumqttc QoS retransmission handles reliability)
-    let now = crate::shared::constants::now_epoch_f64();
+    let now = crate::shared::time::now_epoch_f64();
     safe_kv_set(db, "relay_last_push", Some(&now.to_string()));
     safe_kv_set(db, "relay_last_push_id", Some(&max_id.to_string()));
     safe_kv_set(db, "relay_last_sync", Some(&now.to_string()));

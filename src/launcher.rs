@@ -21,8 +21,6 @@ use crate::shared::constants::{HCOM_IDENTITY_VARS, TOOL_MARKER_VARS};
 use crate::terminal;
 use crate::tools::{codex_preprocessing, opencode_preprocessing};
 
-// ==================== Types ====================
-
 /// Canonical tool types for launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchTool {
@@ -128,8 +126,6 @@ pub struct LaunchResult {
     pub errors: Vec<serde_json::Value>,
 }
 
-// ==================== Helpers ====================
-
 /// Predict if launch will block current terminal (run in same window).
 /// Find tool executable path with fallbacks.
 /// Claude has special fallback locations; other tools just use PATH.
@@ -227,7 +223,10 @@ fn write_system_prompt_file(system_prompt: &str, tool: &str) -> String {
     }
 
     if let Err(e) = fs::write(&filepath, system_prompt) {
-        eprintln!("[hcom] warn: failed to write system prompt to {}: {e}", filepath.display());
+        eprintln!(
+            "[hcom] warn: failed to write system prompt to {}: {e}",
+            filepath.display()
+        );
     }
     filepath.to_string_lossy().to_string()
 }
@@ -240,10 +239,7 @@ fn generate_process_id() -> String {
     let c: u16 = (rng.random::<u16>() & 0x0FFF) | 0x4000; // version 4
     let d: u16 = (rng.random::<u16>() & 0x3FFF) | 0x8000; // variant 1
     let e: u64 = rng.random::<u64>() & 0xFFFFFFFFFFFF; // 48 bits
-    format!(
-        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-        a, b, c, d, e
-    )
+    format!("{:08x}-{:04x}-{:04x}-{:04x}-{:012x}", a, b, c, d, e)
 }
 
 /// Verify hooks are installed for the target tool, auto-install if needed.
@@ -265,7 +261,12 @@ fn ensure_hooks_installed(tool: &LaunchTool) -> Result<()> {
         LaunchTool::Gemini => {
             if !crate::hooks::gemini::is_gemini_version_supported() {
                 if let Some(ver) = crate::hooks::gemini::get_gemini_version() {
-                    bail!("Gemini CLI version {}.{}.{} is too old. Update: npm i -g @google/gemini-cli@latest", ver.0, ver.1, ver.2);
+                    bail!(
+                        "Gemini CLI version {}.{}.{} is too old. Update: npm i -g @google/gemini-cli@latest",
+                        ver.0,
+                        ver.1,
+                        ver.2
+                    );
                 } else {
                     eprintln!("Warning: Could not detect Gemini CLI version");
                 }
@@ -305,8 +306,6 @@ fn build_claude_command(args: &[String]) -> String {
     parts.join(" ")
 }
 
-// ==================== PTY Runner Script ====================
-
 /// Tool-specific extra environment variables for PTY mode.
 fn tool_extra_env(tool: &str) -> HashMap<String, String> {
     let mut m = HashMap::new();
@@ -327,8 +326,7 @@ pub fn create_runner_script(
     tool_args: &[String],
     run_here: bool,
 ) -> Result<String> {
-    let native_bin = std::env::current_exe()
-        .unwrap_or_else(|_| std::path::PathBuf::from("hcom"));
+    let native_bin = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("hcom"));
     let native_bin_str = native_bin.to_string_lossy();
 
     let launch_dir = paths::hcom_path(&[paths::LAUNCH_DIR]);
@@ -391,7 +389,12 @@ pub fn create_runner_script(
          {}\n\
          \n\
          {}{} pty {} {}\n",
-        tool.chars().next().unwrap_or('?').to_uppercase().collect::<String>() + &tool[1..],
+        tool.chars()
+            .next()
+            .unwrap_or('?')
+            .to_uppercase()
+            .collect::<String>()
+            + &tool[1..],
         instance_name,
         native_bin_str,
         crate::tools::args_common::shell_quote(cwd),
@@ -411,13 +414,19 @@ pub fn create_runner_script(
     crate::log::log_info(
         "pty",
         "native.script",
-        &format!("script={} tool={} instance={}", script_file.display(), tool, instance_name),
+        &format!(
+            "script={} tool={} instance={}",
+            script_file.display(),
+            tool,
+            instance_name
+        ),
     );
 
     Ok(script_file.to_string_lossy().to_string())
 }
 
 /// Launch a tool via PTY wrapper in a terminal.
+#[allow(clippy::too_many_arguments)]
 pub fn launch_pty(
     tool: &str,
     cwd: &str,
@@ -441,14 +450,8 @@ pub fn launch_pty(
     runner_env.insert("HCOM_INSTANCE_NAME".to_string(), instance_name.to_string());
     runner_env.extend(tool_extra_env(tool));
 
-    let script_file = create_runner_script(
-        tool,
-        cwd,
-        instance_name,
-        &runner_env,
-        tool_args,
-        run_here,
-    )?;
+    let script_file =
+        create_runner_script(tool, cwd, instance_name, &runner_env, tool_args, run_here)?;
 
     let command = format!(
         "bash {}",
@@ -459,7 +462,7 @@ pub fn launch_pty(
         &command,
         env,
         Some(cwd),
-        false,    // not background
+        false, // not background
         run_here,
         terminal,
         inside_ai_tool,
@@ -469,8 +472,6 @@ pub fn launch_pty(
         terminal::LaunchResult::Failed(_) => Ok(false),
     }
 }
-
-// ==================== Main Launch Function ====================
 
 /// Launch one or more AI tool instances with consistent tracking.
 ///
@@ -486,7 +487,10 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         bail!("Count must be positive");
     }
     if params.count > 100 {
-        bail!("Too many {} instances requested (max 100)", normalized.as_str());
+        bail!(
+            "Too many {} instances requested (max 100)",
+            normalized.as_str()
+        );
     }
     if params.background && normalized == LaunchTool::ClaudePty {
         bail!("Claude PTY does not support headless/background mode");
@@ -527,11 +531,17 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
     // Explicit name validation
     if let Some(ref name) = params.name {
         if params.count > 1 {
-            bail!("Cannot use explicit name with count > 1 (count={})", params.count);
+            bail!(
+                "Cannot use explicit name with count > 1 (count={})",
+                params.count
+            );
         }
         // Check if name is already in use by an active instance
         if let Ok(Some(_)) = db.get_instance(name) {
-            bail!("Instance '{}' already exists (stop it first or use a different name)", name);
+            bail!(
+                "Instance '{}' already exists (stop it first or use a different name)",
+                name
+            );
         }
     }
 
@@ -577,14 +587,13 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
 
     let working_dir = params.cwd.as_deref().unwrap_or(".");
     let launcher_name: String = params.launcher.unwrap_or_else(|| {
-        // Try to resolve caller identity (e.g. when launched from a Claude Code session)
+        // Try to resolve caller identity from the live process binding.
         let process_id = std::env::var("HCOM_PROCESS_ID").ok();
-        let session_id = std::env::var("HCOM_SESSION_ID").ok();
         match crate::identity::resolve_identity(
             db,
             None,
             None,
-            session_id.as_deref(),
+            None,
             process_id.as_deref(),
             None,
             None,
@@ -598,7 +607,9 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         .unwrap_or_else(|| format!("{:08x}", rand::rng().random::<u32>()));
 
     let inside_ai_tool = crate::shared::context::HcomContext::from_os().is_inside_ai_tool();
-    let terminal_mode = params.terminal.as_deref()
+    let terminal_mode = params
+        .terminal
+        .as_deref()
         .or(Some(hcom_config.terminal.as_str()).filter(|t| !t.is_empty()));
 
     let mut launched = 0usize;
@@ -609,10 +620,16 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
     for _ in 0..params.count {
         let mut instance_env = base_env.clone();
         instance_env.insert("HCOM_LAUNCHED".to_string(), "1".to_string());
-        instance_env.insert("HCOM_LAUNCH_EVENT_ID".to_string(), db.get_last_event_id().to_string());
+        instance_env.insert(
+            "HCOM_LAUNCH_EVENT_ID".to_string(),
+            db.get_last_event_id().to_string(),
+        );
         instance_env.insert("HCOM_LAUNCHED_BY".to_string(), launcher_name.to_string());
         instance_env.insert("HCOM_LAUNCH_BATCH_ID".to_string(), batch_id.clone());
-        instance_env.insert("HCOM_DIR".to_string(), paths::hcom_dir().to_string_lossy().to_string());
+        instance_env.insert(
+            "HCOM_DIR".to_string(),
+            paths::hcom_dir().to_string_lossy().to_string(),
+        );
 
         // Propagate dev root
         if let Ok(val) = std::env::var("HCOM_DEV_ROOT") {
@@ -662,14 +679,18 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
             instances::initialize_instance_in_position_file(
                 db,
                 &instance_name,
-                None, // session_id
-                None, // parent_session_id
-                None, // parent_name
-                None, // agent_id
-                None, // transcript_path
+                None,            // session_id
+                None,            // parent_session_id
+                None,            // parent_name
+                None,            // agent_id
+                None,            // transcript_path
                 Some(tool_type), // tool
                 params.background,
-                if effective_tag.is_empty() { None } else { Some(effective_tag.as_str()) },
+                if effective_tag.is_empty() {
+                    None
+                } else {
+                    Some(effective_tag.as_str())
+                },
                 None, // wait_timeout
                 None, // subagent_timeout
                 None, // hints
@@ -691,7 +712,9 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         };
         if !is_tool_installed(tool_binary) {
             eprintln!("Error: '{}' is not installed or not in PATH", tool_binary);
-            errors.push(json!({"tool": normalized.as_str(), "error": format!("{} not found", tool_binary)}));
+            errors.push(
+                json!({"tool": normalized.as_str(), "error": format!("{} not found", tool_binary)}),
+            );
             continue;
         }
 
@@ -738,16 +761,17 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                                     &serde_json::Map::from_iter([("pid".to_string(), json!(pid))]),
                                 );
                                 // Track PID for orphan detection
-                                crate::pidtrack::record_pid(
-                                    &crate::paths::hcom_dir(),
-                                    pid,
-                                    "claude",
-                                    &instance_name,
-                                    working_dir,
-                                    &process_id,
-                                    "", "", "", "", "", 0, 0,
-                                    params.tag.as_deref().unwrap_or(""),
-                                );
+                                crate::pidtrack::record_pid(&crate::pidtrack::PidRecord {
+                                    process_id: &process_id,
+                                    tag: params.tag.as_deref().unwrap_or(""),
+                                    ..crate::pidtrack::PidRecord::new(
+                                        &crate::paths::hcom_dir(),
+                                        pid,
+                                        "claude",
+                                        &instance_name,
+                                        working_dir,
+                                    )
+                                });
                                 log_files.push(log_file.clone());
                                 handles.push(json!({
                                     "tool": "claude",
@@ -777,7 +801,9 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                             inside_ai_tool,
                         )? {
                             terminal::LaunchResult::Success => {
-                                handles.push(json!({"tool": "claude", "instance_name": instance_name}));
+                                handles.push(
+                                    json!({"tool": "claude", "instance_name": instance_name}),
+                                );
                                 Ok(true)
                             }
                             _ => Ok(false),
@@ -795,11 +821,21 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                         )]),
                     );
                     let effective_run_here = will_run_in_current_terminal(
-                        params.count, false, params.run_here, terminal_mode, inside_ai_tool,
+                        params.count,
+                        false,
+                        params.run_here,
+                        terminal_mode,
+                        inside_ai_tool,
                     );
                     let ok = launch_pty(
-                        "claude", working_dir, &instance_env, &instance_name,
-                        &params.args, effective_run_here, terminal_mode, inside_ai_tool,
+                        "claude",
+                        working_dir,
+                        &instance_env,
+                        &instance_name,
+                        &params.args,
+                        effective_run_here,
+                        terminal_mode,
+                        inside_ai_tool,
                     )?;
                     if ok {
                         handles.push(json!({"tool": "claude-pty", "instance_name": instance_name}));
@@ -817,11 +853,21 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                         )]),
                     );
                     let effective_run_here = will_run_in_current_terminal(
-                        params.count, false, params.run_here, terminal_mode, inside_ai_tool,
+                        params.count,
+                        false,
+                        params.run_here,
+                        terminal_mode,
+                        inside_ai_tool,
                     );
                     let ok = launch_pty(
-                        "gemini", working_dir, &instance_env, &instance_name,
-                        &params.args, effective_run_here, terminal_mode, inside_ai_tool,
+                        "gemini",
+                        working_dir,
+                        &instance_env,
+                        &instance_name,
+                        &params.args,
+                        effective_run_here,
+                        terminal_mode,
+                        inside_ai_tool,
                     )?;
                     if ok {
                         handles.push(json!({"tool": "gemini", "instance_name": instance_name}));
@@ -840,7 +886,8 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                     // Build effective args: system_prompt + preprocessing
                     let mut effective_args = params.args.clone();
                     if let Some(ref sp) = params.system_prompt {
-                        let mut pre = vec!["-c".to_string(), format!("developer_instructions={}", sp)];
+                        let mut pre =
+                            vec!["-c".to_string(), format!("developer_instructions={}", sp)];
                         pre.extend(effective_args);
                         effective_args = pre;
                     }
@@ -882,11 +929,21 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                     instance_env.insert("HCOM_CODEX_SANDBOX_MODE".to_string(), sandbox_mode);
 
                     let effective_run_here = will_run_in_current_terminal(
-                        params.count, false, params.run_here, terminal_mode, inside_ai_tool,
+                        params.count,
+                        false,
+                        params.run_here,
+                        terminal_mode,
+                        inside_ai_tool,
                     );
                     let ok = launch_pty(
-                        "codex", working_dir, &instance_env, &instance_name,
-                        &effective_args, effective_run_here, terminal_mode, inside_ai_tool,
+                        "codex",
+                        working_dir,
+                        &instance_env,
+                        &instance_name,
+                        &effective_args,
+                        effective_run_here,
+                        terminal_mode,
+                        inside_ai_tool,
                     )?;
                     if ok {
                         handles.push(json!({"tool": "codex", "instance_name": instance_name}));
@@ -910,11 +967,21 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                     );
 
                     let effective_run_here = will_run_in_current_terminal(
-                        params.count, false, params.run_here, terminal_mode, inside_ai_tool,
+                        params.count,
+                        false,
+                        params.run_here,
+                        terminal_mode,
+                        inside_ai_tool,
                     );
                     let ok = launch_pty(
-                        "opencode", working_dir, &instance_env, &instance_name,
-                        &params.args, effective_run_here, terminal_mode, inside_ai_tool,
+                        "opencode",
+                        working_dir,
+                        &instance_env,
+                        &instance_name,
+                        &params.args,
+                        effective_run_here,
+                        terminal_mode,
+                        inside_ai_tool,
                     )?;
                     if ok {
                         handles.push(json!({"tool": "opencode", "instance_name": instance_name}));
@@ -941,9 +1008,17 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         if !errors.is_empty() {
             let details: Vec<String> = errors
                 .iter()
-                .filter_map(|e| e.get("error").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .filter_map(|e| {
+                    e.get("error")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
                 .collect();
-            bail!("No instances launched (0/{}): {}", params.count, details.join("; "));
+            bail!(
+                "No instances launched (0/{}): {}",
+                params.count,
+                details.join("; ")
+            );
         }
         bail!("No instances launched (0/{})", params.count);
     }
@@ -963,14 +1038,19 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
             "background": params.background,
             "tag": effective_tag,
         }),
-    ).ok();
+    )
+    .ok();
 
     // Push launch event to relay (best-effort)
-    let _ = std::process::Command::new("hcom")
-        .args(["relay", "push"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let prefix = crate::runtime_env::get_hcom_prefix();
+    if let Some((cmd, prefix_args)) = prefix.split_first() {
+        let _ = std::process::Command::new(cmd)
+            .args(prefix_args)
+            .args(["relay", "push"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
 
     Ok(LaunchResult {
         tool: normalized.as_str().to_string(),
@@ -1019,11 +1099,26 @@ mod tests {
 
     #[test]
     fn test_launch_tool_from_str() {
-        assert_eq!(LaunchTool::from_str("claude", false).unwrap(), LaunchTool::Claude);
-        assert_eq!(LaunchTool::from_str("claude", true).unwrap(), LaunchTool::ClaudePty);
-        assert_eq!(LaunchTool::from_str("gemini", false).unwrap(), LaunchTool::Gemini);
-        assert_eq!(LaunchTool::from_str("codex", false).unwrap(), LaunchTool::Codex);
-        assert_eq!(LaunchTool::from_str("opencode", false).unwrap(), LaunchTool::OpenCode);
+        assert_eq!(
+            LaunchTool::from_str("claude", false).unwrap(),
+            LaunchTool::Claude
+        );
+        assert_eq!(
+            LaunchTool::from_str("claude", true).unwrap(),
+            LaunchTool::ClaudePty
+        );
+        assert_eq!(
+            LaunchTool::from_str("gemini", false).unwrap(),
+            LaunchTool::Gemini
+        );
+        assert_eq!(
+            LaunchTool::from_str("codex", false).unwrap(),
+            LaunchTool::Codex
+        );
+        assert_eq!(
+            LaunchTool::from_str("opencode", false).unwrap(),
+            LaunchTool::OpenCode
+        );
         assert!(LaunchTool::from_str("unknown", false).is_err());
     }
 
@@ -1053,11 +1148,29 @@ mod tests {
     #[test]
     fn test_will_run_in_current_terminal() {
         // Explicit override
-        assert!(will_run_in_current_terminal(5, false, Some(true), None, false));
-        assert!(!will_run_in_current_terminal(1, false, Some(false), None, false));
+        assert!(will_run_in_current_terminal(
+            5,
+            false,
+            Some(true),
+            None,
+            false
+        ));
+        assert!(!will_run_in_current_terminal(
+            1,
+            false,
+            Some(false),
+            None,
+            false
+        ));
 
         // terminal=here
-        assert!(will_run_in_current_terminal(5, false, None, Some("here"), false));
+        assert!(will_run_in_current_terminal(
+            5,
+            false,
+            None,
+            Some("here"),
+            false
+        ));
 
         // Inside AI tool → always new window
         assert!(!will_run_in_current_terminal(1, false, None, None, true));

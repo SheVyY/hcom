@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 use crate::config::HcomConfig;
 use crate::db::HcomDb;
 use crate::hooks::claude_args;
+use crate::identity;
 use crate::launcher::{self, LaunchParams};
 use crate::log::log_info;
 use crate::router::GlobalFlags;
@@ -67,7 +68,12 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     // Open DB
     let db = HcomDb::open()?;
 
-    let launcher_name = flags.name.as_deref();
+    let launcher_name = resolve_launcher_name(
+        &db,
+        flags,
+        std::env::var("HCOM_PROCESS_ID").ok().as_deref(),
+    );
+    let launcher_name_ref = launcher_name.as_str();
 
     // Clone for post-launch tips (originals are moved into LaunchParams)
     let tag_for_tips = tag.clone();
@@ -90,7 +96,7 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
                     .unwrap_or_else(|_| ".".to_string()),
             ),
             env: None,
-            launcher: launcher_name.map(|s| s.to_string()),
+            launcher: Some(launcher_name.clone()),
             run_here: hcom_flags.run_here,
             batch_id: hcom_flags.batch_id,
             name: None, // --name is caller identity, not instance name
@@ -116,15 +122,21 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     let tool_label = capitalize(&tool);
     let plural = if count != 1 { "s" } else { "" };
     if result.failed > 0 {
-        println!("Started the launch process for {}/{} {} agent{} ({} failed)",
-            result.launched, count, tool_label, plural, result.failed);
+        println!(
+            "Started the launch process for {}/{} {} agent{} ({} failed)",
+            result.launched, count, tool_label, plural, result.failed
+        );
     } else {
         let s = if result.launched != 1 { "s" } else { "" };
-        println!("Started the launch process for {} {} agent{}",
-            result.launched, tool_label, s);
+        println!(
+            "Started the launch process for {} {} agent{}",
+            result.launched, tool_label, s
+        );
     }
 
-    let instance_names: Vec<&str> = result.handles.iter()
+    let instance_names: Vec<&str> = result
+        .handles
+        .iter()
         .filter_map(|h| h.get("instance_name").and_then(|v| v.as_str()))
         .collect();
     if !instance_names.is_empty() {
@@ -134,18 +146,34 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     println!("To block until ready or fail (30s timeout), run: hcom events launch");
 
     // Launch tips
-    let launcher_participating = launcher_name
-        .map(|n| db.get_instance_full(n).ok().flatten().is_some())
-        .unwrap_or(false);
-    let terminal_mode = terminal_for_tips.as_deref().unwrap_or(&hcom_config.terminal);
+    let launcher_participating = db
+        .get_instance_full(launcher_name_ref)
+        .ok()
+        .flatten()
+        .is_some();
+    let detected_terminal;
+    let terminal_auto_detected;
+    let terminal_mode = if let Some(t) = terminal_for_tips.as_deref() {
+        terminal_auto_detected = false;
+        t
+    } else if hcom_config.terminal != "default" && !hcom_config.terminal.is_empty() {
+        terminal_auto_detected = false;
+        &hcom_config.terminal
+    } else {
+        detected_terminal = crate::terminal::detect_terminal_from_env()
+            .unwrap_or_else(|| "default".to_string());
+        terminal_auto_detected = detected_terminal != "default";
+        &detected_terminal
+    };
     crate::core::tips::print_launch_tips(
         &db,
         result.launched,
         tag_for_tips.as_deref(),
-        launcher_name,
+        Some(launcher_name_ref),
         launcher_participating,
         background,
         terminal_mode,
+        terminal_auto_detected,
     );
 
     // Log summary
@@ -161,6 +189,24 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     Ok(if result.failed == 0 { 0 } else { 1 })
 }
 
+fn resolve_launcher_name(
+    db: &HcomDb,
+    flags: &GlobalFlags,
+    process_id: Option<&str>,
+) -> String {
+    // Launch caller identity only needs explicit --name, then process binding.
+    flags
+        .name
+        .as_deref()
+        .map(|name| crate::instances::resolve_display_name(db, name).unwrap_or_else(|| name.to_string()))
+        .or_else(|| flags.name.clone())
+        .unwrap_or_else(|| {
+        identity::resolve_identity(db, None, None, None, process_id, None, None)
+            .map(|id| id.name)
+            .unwrap_or_else(|_| "user".to_string())
+        })
+}
+
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -170,8 +216,19 @@ fn capitalize(s: &str) -> String {
 }
 
 /// Print launch preview when --go gate blocks inside AI tool.
-fn print_launch_preview(tool: &str, count: usize, background: bool, args: &[String], tag: &Option<String>, config: &HcomConfig) {
-    let mode = if background { "headless" } else { "interactive" };
+fn print_launch_preview(
+    tool: &str,
+    count: usize,
+    background: bool,
+    args: &[String],
+    tag: &Option<String>,
+    config: &HcomConfig,
+) {
+    let mode = if background {
+        "headless"
+    } else {
+        "interactive"
+    };
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| ".".to_string());
@@ -210,8 +267,6 @@ fn print_launch_preview(tool: &str, count: usize, background: bool, args: &[Stri
     }
 }
 
-// ==================== Arg Parsing ====================
-
 /// Hcom-level flags extracted from launch argv.
 #[derive(Debug, Default)]
 struct HcomLaunchFlags {
@@ -237,8 +292,14 @@ fn parse_launch_argv(argv: &[String]) -> Result<(usize, String, HcomLaunchFlags,
     // Skip --name/--go (global flags already extracted by router)
     while idx < argv.len() {
         match argv[idx].as_str() {
-            "--name" => { idx += 2; continue; }
-            "--go" => { idx += 1; continue; }
+            "--name" => {
+                idx += 2;
+                continue;
+            }
+            "--go" => {
+                idx += 1;
+                continue;
+            }
             _ => break,
         }
     }
@@ -347,7 +408,8 @@ fn merge_tool_args(tool: &str, cli_args: &[String], config: &HcomConfig) -> Vec<
             if env_str.is_empty() {
                 return cli_args.to_vec();
             }
-            let env_tokens: Vec<String> = crate::tools::args_common::shell_split(env_str).unwrap_or_default();
+            let env_tokens: Vec<String> =
+                crate::tools::args_common::shell_split(env_str).unwrap_or_default();
             let env_spec = claude_args::resolve_claude_args(Some(&env_tokens), None);
             let cli_spec = claude_args::resolve_claude_args(Some(cli_args), None);
             let merged = claude_args::merge_claude_args(&env_spec, &cli_spec);
@@ -358,7 +420,8 @@ fn merge_tool_args(tool: &str, cli_args: &[String], config: &HcomConfig) -> Vec<
             if env_str.is_empty() {
                 return cli_args.to_vec();
             }
-            let env_tokens: Vec<String> = crate::tools::args_common::shell_split(env_str).unwrap_or_default();
+            let env_tokens: Vec<String> =
+                crate::tools::args_common::shell_split(env_str).unwrap_or_default();
             let env_spec = gemini_args::resolve_gemini_args(Some(&env_tokens), None);
             let cli_spec = gemini_args::resolve_gemini_args(Some(cli_args), None);
             let merged = gemini_args::merge_gemini_args(&env_spec, &cli_spec);
@@ -369,7 +432,8 @@ fn merge_tool_args(tool: &str, cli_args: &[String], config: &HcomConfig) -> Vec<
             if env_str.is_empty() {
                 return cli_args.to_vec();
             }
-            let env_tokens: Vec<String> = crate::tools::args_common::shell_split(env_str).unwrap_or_default();
+            let env_tokens: Vec<String> =
+                crate::tools::args_common::shell_split(env_str).unwrap_or_default();
             let env_spec = codex_args::resolve_codex_args(Some(&env_tokens), None);
             let cli_spec = codex_args::resolve_codex_args(Some(cli_args), None);
             let merged = codex_args::merge_codex_args(&env_spec, &cli_spec);
@@ -412,7 +476,8 @@ mod tests {
 
     #[test]
     fn test_parse_launch_argv_with_count() {
-        let (count, tool, _, args) = parse_launch_argv(&s(&["3", "gemini", "-m", "flash"])).unwrap();
+        let (count, tool, _, args) =
+            parse_launch_argv(&s(&["3", "gemini", "-m", "flash"])).unwrap();
         assert_eq!(count, 3);
         assert_eq!(tool, "gemini");
         assert_eq!(args, s(&["-m", "flash"]));
@@ -420,7 +485,8 @@ mod tests {
 
     #[test]
     fn test_parse_launch_argv_with_tag() {
-        let (_, tool, flags, args) = parse_launch_argv(&s(&["claude", "--tag", "test", "--model", "haiku"])).unwrap();
+        let (_, tool, flags, args) =
+            parse_launch_argv(&s(&["claude", "--tag", "test", "--model", "haiku"])).unwrap();
         assert_eq!(tool, "claude");
         assert_eq!(flags.tag, Some("test".to_string()));
         assert_eq!(args, s(&["--model", "haiku"]));
@@ -429,7 +495,8 @@ mod tests {
     #[test]
     fn test_parse_launch_argv_tag_after_tool_args() {
         // --tag after tool-specific args should still be extracted (order-independent)
-        let (_, tool, flags, args) = parse_launch_argv(&s(&["claude", "--model", "haiku", "--tag", "test"])).unwrap();
+        let (_, tool, flags, args) =
+            parse_launch_argv(&s(&["claude", "--model", "haiku", "--tag", "test"])).unwrap();
         assert_eq!(tool, "claude");
         assert_eq!(flags.tag, Some("test".to_string()));
         assert_eq!(args, s(&["--model", "haiku"]));
@@ -443,13 +510,15 @@ mod tests {
 
     #[test]
     fn test_parse_launch_argv_with_terminal() {
-        let (_, _, flags, _) = parse_launch_argv(&s(&["claude", "--terminal", "kitty-tab"])).unwrap();
+        let (_, _, flags, _) =
+            parse_launch_argv(&s(&["claude", "--terminal", "kitty-tab"])).unwrap();
         assert_eq!(flags.terminal, Some("kitty-tab".to_string()));
     }
 
     #[test]
     fn test_parse_launch_argv_skips_global_flags() {
-        let (count, tool, _, _) = parse_launch_argv(&s(&["--name", "bot", "--go", "2", "codex"])).unwrap();
+        let (count, tool, _, _) =
+            parse_launch_argv(&s(&["--name", "bot", "--go", "2", "codex"])).unwrap();
         assert_eq!(count, 2);
         assert_eq!(tool, "codex");
     }
@@ -470,7 +539,10 @@ mod tests {
     #[test]
     fn test_parse_launch_argv_name_after_tool_args() {
         // --name after tool args should be stripped, not passed as tool arg
-        let (count, tool, flags, args) = parse_launch_argv(&s(&["1", "claude", "--model", "haiku", "--tag", "test-cl", "--name", "nafo"])).unwrap();
+        let (count, tool, flags, args) = parse_launch_argv(&s(&[
+            "1", "claude", "--model", "haiku", "--tag", "test-cl", "--name", "nafo",
+        ]))
+        .unwrap();
         assert_eq!(count, 1);
         assert_eq!(tool, "claude");
         assert_eq!(flags.tag, Some("test-cl".to_string()));
@@ -480,45 +552,111 @@ mod tests {
     #[test]
     fn test_parse_launch_argv_go_after_tool_args() {
         // --go after tool args should be stripped
-        let (_, _, _, args) = parse_launch_argv(&s(&["claude", "--model", "haiku", "--go"])).unwrap();
+        let (_, _, _, args) =
+            parse_launch_argv(&s(&["claude", "--model", "haiku", "--go"])).unwrap();
         assert_eq!(args, s(&["--model", "haiku"]));
     }
 
     #[test]
     fn test_parse_launch_argv_hcom_prompt() {
-        let (_, _, flags, args) = parse_launch_argv(&s(&["claude", "--hcom-prompt", "do the thing", "--model", "haiku"])).unwrap();
+        let (_, _, flags, args) = parse_launch_argv(&s(&[
+            "claude",
+            "--hcom-prompt",
+            "do the thing",
+            "--model",
+            "haiku",
+        ]))
+        .unwrap();
         assert_eq!(flags.initial_prompt, Some("do the thing".to_string()));
         assert_eq!(args, s(&["--model", "haiku"]));
     }
 
     #[test]
     fn test_parse_launch_argv_hcom_system_prompt() {
-        let (_, _, flags, args) = parse_launch_argv(&s(&["claude", "--hcom-system-prompt", "you are helpful", "--model", "haiku"])).unwrap();
+        let (_, _, flags, args) = parse_launch_argv(&s(&[
+            "claude",
+            "--hcom-system-prompt",
+            "you are helpful",
+            "--model",
+            "haiku",
+        ]))
+        .unwrap();
         assert_eq!(flags.system_prompt, Some("you are helpful".to_string()));
         assert_eq!(args, s(&["--model", "haiku"]));
     }
 
     #[test]
     fn test_parse_launch_argv_system_legacy_alias() {
-        let (_, _, flags, args) = parse_launch_argv(&s(&["claude", "--system", "you are helpful"])).unwrap();
+        let (_, _, flags, args) =
+            parse_launch_argv(&s(&["claude", "--system", "you are helpful"])).unwrap();
         assert_eq!(flags.system_prompt, Some("you are helpful".to_string()));
         assert!(args.is_empty());
     }
 
     #[test]
     fn test_parse_launch_argv_batch_id() {
-        let (_, _, flags, args) = parse_launch_argv(&s(&["claude", "--batch-id", "batch-123", "--model", "haiku"])).unwrap();
+        let (_, _, flags, args) = parse_launch_argv(&s(&[
+            "claude",
+            "--batch-id",
+            "batch-123",
+            "--model",
+            "haiku",
+        ]))
+        .unwrap();
         assert_eq!(flags.batch_id, Some("batch-123".to_string()));
         assert_eq!(args, s(&["--model", "haiku"]));
     }
 
     #[test]
     fn test_is_background_claude_headless() {
-        assert!(is_background_from_args("claude", &s(&["-p", "fix tests", "--output-format", "json"])));
+        assert!(is_background_from_args(
+            "claude",
+            &s(&["-p", "fix tests", "--output-format", "json"])
+        ));
     }
 
     #[test]
     fn test_is_background_claude_interactive() {
-        assert!(!is_background_from_args("claude", &s(&["--model", "haiku"])));
+        assert!(!is_background_from_args(
+            "claude",
+            &s(&["--model", "haiku"])
+        ));
+    }
+
+    #[test]
+    fn test_resolve_launcher_name_prefers_explicit_name() {
+        crate::config::Config::init();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = HcomDb::open_at(&db_path).unwrap();
+        db.init_db().unwrap();
+        let flags = GlobalFlags {
+            name: Some("explicit".to_string()),
+            go: false,
+        };
+
+        let name = resolve_launcher_name(&db, &flags, Some("pid-123"));
+        assert_eq!(name, "explicit");
+    }
+
+    #[test]
+    fn test_resolve_launcher_name_falls_back_to_process_binding() {
+        crate::config::Config::init();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = HcomDb::open_at(&db_path).unwrap();
+        db.init_db().unwrap();
+        let now = crate::shared::time::now_epoch_f64();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, session_id, directory, last_event_id, last_stop, created_at, status, status_time, status_context, tool)
+                 VALUES (?1, '', '.', 0, 0, ?2, 'active', ?2, 'test', 'claude')",
+                rusqlite::params!["bound", now],
+            )
+            .unwrap();
+        db.set_process_binding("pid-123", "", "bound").unwrap();
+
+        let name = resolve_launcher_name(&db, &GlobalFlags::default(), Some("pid-123"));
+        assert_eq!(name, "bound");
     }
 }

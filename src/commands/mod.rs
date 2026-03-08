@@ -1,36 +1,34 @@
 //! CLI commands for hcom.
 //!
 
-// Batch 1
-pub mod send;
-pub mod list;
-pub mod stop;
+// Messaging
 pub mod listen;
+pub mod send;
 
-// Batch 2
+// Lifecycle
+pub mod daemon;
 pub mod fork;
 pub mod kill;
 pub mod launch;
 pub mod resume;
 pub mod start;
+pub mod stop;
 
-// Batch 3
+// Diagnostics
 pub mod bundle;
-pub mod config;
 pub mod events;
+pub mod list;
 pub mod status;
+pub mod term;
 pub mod transcript;
 
-// Batch 4
+// Management
 pub mod archive;
-pub mod reset;
-pub mod hooks;
-pub mod term;
-pub mod relay;
-pub mod run;
-
-// Batch 5
-pub mod daemon;
-
-// Help
+pub mod config;
 pub mod help;
+pub mod hooks;
+pub mod relay;
+pub mod reset;
+pub(crate) mod reset_ops;
+pub(crate) mod reset_preview;
+pub mod run;

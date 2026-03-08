@@ -6,20 +6,14 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use crate::db::HcomDb;
-use crate::hooks::common as hook_common;
 use crate::instances::get_full_name;
 use crate::paths;
 use crate::shared::constants::{SENDER, ST_ACTIVE, ST_LISTENING};
 
-// =============================================================================
 // Bundled script names (compile-time known).
 // User scripts are discovered at runtime from ~/.hcom/scripts/.
-// =============================================================================
 
-
-// =============================================================================
 // MAIN BOOTSTRAP TEMPLATE
-// =============================================================================
 
 const UNIVERSAL: &str = r#"[HCOM SESSION]
 You have access to the hcom communication tool.
@@ -149,9 +143,7 @@ Subagents can join hcom:
 Subagents get their own hcom context and a random name. DO NOT give them any specific hcom syntax.
 Set keep-alive: `hcom config -i self subagent_timeout [SEC]`"#;
 
-// =============================================================================
 // SUBAGENT BOOTSTRAP
-// =============================================================================
 
 const SUBAGENT_BOOTSTRAP: &str = r#"[HCOM SESSION]
 You're participating in the hcom multi-agent network.
@@ -184,9 +176,7 @@ Rules:
 - Authority: @{SENDER} > others
 - Use --intent on sends: request (want reply), inform (FYI), ack (responding)"#;
 
-// =============================================================================
 // HELPERS
-// =============================================================================
 
 /// Get concise list of active instances grouped by tool.
 /// Returns empty string if no active instances, or "\nActive (snapshot): claude: a, b | codex: c".
@@ -196,7 +186,7 @@ fn get_active_instances(db: &HcomDb, exclude_name: &str) -> String {
         Err(_) => return String::new(),
     };
 
-    let now = crate::shared::constants::now_epoch_f64();
+    let now = crate::shared::time::now_epoch_f64();
     let cutoff = now - 60.0;
 
     // Collect names grouped by tool, preserving insertion order via BTreeMap
@@ -265,13 +255,13 @@ fn get_scripts(hcom_dir: &std::path::Path) -> String {
         return String::new();
     }
 
-    format!("Scripts: {}", names.into_iter().collect::<Vec<_>>().join(", "))
+    format!(
+        "Scripts: {}",
+        names.into_iter().collect::<Vec<_>>().join(", ")
+    )
 }
 
-
-// =============================================================================
 // CONTEXT BUILDER
-// =============================================================================
 
 /// All context needed to render bootstrap templates.
 struct BootstrapContext {
@@ -288,6 +278,7 @@ struct BootstrapContext {
 }
 
 /// Build context for template substitution.
+#[allow(clippy::too_many_arguments)]
 fn build_context(
     db: &HcomDb,
     hcom_dir: &std::path::Path,
@@ -301,9 +292,10 @@ fn build_context(
     background_name: Option<&str>,
 ) -> BootstrapContext {
     // Load instance data for display name + tag override
-    let instance_data = db.iter_instances_full().ok().and_then(|instances| {
-        instances.into_iter().find(|i| i.name == instance_name)
-    });
+    let instance_data = db
+        .iter_instances_full()
+        .ok()
+        .and_then(|instances| instances.into_iter().find(|i| i.name == instance_name));
 
     let display_name = instance_data
         .as_ref()
@@ -325,7 +317,7 @@ fn build_context(
         display_name,
         tag: effective_tag,
         relay_enabled,
-        hcom_cmd: hook_common::build_hcom_command(),
+        hcom_cmd: crate::runtime_env::build_hcom_command(),
         is_launched,
         is_headless,
         active_instances: get_active_instances(db, instance_name),
@@ -350,9 +342,7 @@ fn render_template(template: &str, ctx: &BootstrapContext) -> String {
         .replace("}}", "}")
 }
 
-// =============================================================================
 // PUBLIC API
-// =============================================================================
 
 /// Build bootstrap text for an instance.
 ///
@@ -367,6 +357,7 @@ fn render_template(template: &str, ctx: &BootstrapContext) -> String {
 ///   tag: Tag from config (instance-level tag overrides this)
 ///   relay_enabled: Whether relay is configured and enabled
 ///   background_name: Background log name (if headless via HCOM_BACKGROUND)
+#[allow(clippy::too_many_arguments)]
 pub fn get_bootstrap(
     db: &HcomDb,
     hcom_dir: &std::path::Path,
@@ -455,7 +446,7 @@ pub fn get_bootstrap(
 
 /// Build bootstrap text for a subagent instance.
 pub fn get_subagent_bootstrap(subagent_name: &str, parent_name: &str) -> String {
-    let hcom_cmd = hook_common::build_hcom_command();
+    let hcom_cmd = crate::runtime_env::build_hcom_command();
 
     let result = SUBAGENT_BOOTSTRAP
         .replace("{subagent_name}", subagent_name)
@@ -471,9 +462,7 @@ pub fn get_subagent_bootstrap(subagent_name: &str, parent_name: &str) -> String 
     format!("<hcom>\n{}\n</hcom>", output)
 }
 
-// =============================================================================
 // TESTS
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -495,7 +484,10 @@ mod tests {
         data.insert("name".to_string(), serde_json::json!(name));
         data.insert("status".to_string(), serde_json::json!(status));
         data.insert("tool".to_string(), serde_json::json!(tool));
-        data.insert("status_time".to_string(), serde_json::json!(crate::shared::constants::now_epoch_i64() as u64));
+        data.insert(
+            "status_time".to_string(),
+            serde_json::json!(crate::shared::time::now_epoch_i64() as u64),
+        );
         data.insert("created_at".to_string(), serde_json::json!(1000.0));
         if let Some(t) = tag {
             data.insert("tag".to_string(), serde_json::json!(t));
@@ -575,7 +567,16 @@ mod tests {
         let (tmp, db) = setup_test_db();
 
         let result = get_bootstrap(
-            &db, tmp.path(), "luna", "claude", false, true, "", "", false, None,
+            &db,
+            tmp.path(),
+            "luna",
+            "claude",
+            false,
+            true,
+            "",
+            "",
+            false,
+            None,
         );
 
         assert!(result.contains("<hcom_system_context>"));
@@ -593,7 +594,16 @@ mod tests {
         let (tmp, db) = setup_test_db();
 
         let result = get_bootstrap(
-            &db, tmp.path(), "nova", "codex", false, true, "", "", false, None,
+            &db,
+            tmp.path(),
+            "nova",
+            "codex",
+            false,
+            true,
+            "",
+            "",
+            false,
+            None,
         );
 
         assert!(result.contains("IMMEDIATELY to read message"));
@@ -605,7 +615,16 @@ mod tests {
         let (tmp, db) = setup_test_db();
 
         let result = get_bootstrap(
-            &db, tmp.path(), "kira", "adhoc", false, false, "", "", false, None,
+            &db,
+            tmp.path(),
+            "kira",
+            "adhoc",
+            false,
+            false,
+            "",
+            "",
+            false,
+            None,
         );
 
         assert!(result.contains("Messages do NOT arrive automatically"));
@@ -617,7 +636,16 @@ mod tests {
         let (tmp, db) = setup_test_db();
 
         let result = get_bootstrap(
-            &db, tmp.path(), "luna", "claude", false, true, "", "p0c", false, None,
+            &db,
+            tmp.path(),
+            "luna",
+            "claude",
+            false,
+            true,
+            "",
+            "p0c",
+            false,
+            None,
         );
 
         assert!(result.contains("tagged \"p0c\""));
@@ -629,7 +657,16 @@ mod tests {
         let (tmp, db) = setup_test_db();
 
         let result = get_bootstrap(
-            &db, tmp.path(), "luna", "claude", false, true, "", "", true, None,
+            &db,
+            tmp.path(),
+            "luna",
+            "claude",
+            false,
+            true,
+            "",
+            "",
+            true,
+            None,
         );
 
         assert!(result.contains("Remote agents have suffix"));
@@ -640,7 +677,16 @@ mod tests {
         let (tmp, db) = setup_test_db();
 
         let result = get_bootstrap(
-            &db, tmp.path(), "luna", "claude", true, true, "", "", false, None,
+            &db,
+            tmp.path(),
+            "luna",
+            "claude",
+            true,
+            true,
+            "",
+            "",
+            false,
+            None,
         );
 
         assert!(result.contains("Headless mode"));
@@ -651,7 +697,16 @@ mod tests {
         let (tmp, db) = setup_test_db();
 
         let result = get_bootstrap(
-            &db, tmp.path(), "luna", "claude", false, true, "Remember to use bun", "", false, None,
+            &db,
+            tmp.path(),
+            "luna",
+            "claude",
+            false,
+            true,
+            "Remember to use bun",
+            "",
+            false,
+            None,
         );
 
         assert!(result.contains("## NOTES"));
@@ -694,7 +749,16 @@ mod tests {
         let (tmp, db) = setup_test_db();
 
         let result = get_bootstrap(
-            &db, tmp.path(), "nova", "gemini", false, true, "", "", false, None,
+            &db,
+            tmp.path(),
+            "nova",
+            "gemini",
+            false,
+            true,
+            "",
+            "",
+            false,
+            None,
         );
 
         assert!(result.contains("Messages instantly and automatically arrive"));
@@ -705,7 +769,16 @@ mod tests {
         let (tmp, db) = setup_test_db();
 
         let result = get_bootstrap(
-            &db, tmp.path(), "nova", "gemini", false, false, "", "", false, None,
+            &db,
+            tmp.path(),
+            "nova",
+            "gemini",
+            false,
+            false,
+            "",
+            "",
+            false,
+            None,
         );
 
         assert!(result.contains("Messages do NOT arrive automatically"));
@@ -716,7 +789,16 @@ mod tests {
         let (tmp, db) = setup_test_db();
 
         let result = get_bootstrap(
-            &db, tmp.path(), "nova", "opencode", false, false, "", "", false, None,
+            &db,
+            tmp.path(),
+            "nova",
+            "opencode",
+            false,
+            false,
+            "",
+            "",
+            false,
+            None,
         );
 
         assert!(result.contains("Messages instantly and automatically arrive"));
@@ -727,7 +809,16 @@ mod tests {
         let (tmp, db) = setup_test_db();
 
         let result = get_bootstrap(
-            &db, tmp.path(), "luna", "claude", false, true, "", "", false, Some("agent.log"),
+            &db,
+            tmp.path(),
+            "luna",
+            "claude",
+            false,
+            true,
+            "",
+            "",
+            false,
+            Some("agent.log"),
         );
 
         assert!(result.contains("Headless mode"));
@@ -740,7 +831,16 @@ mod tests {
 
         // Config tag is "team-b" but instance has "team-a"
         let result = get_bootstrap(
-            &db, tmp.path(), "luna", "claude", false, true, "", "team-b", false, None,
+            &db,
+            tmp.path(),
+            "luna",
+            "claude",
+            false,
+            true,
+            "",
+            "team-b",
+            false,
+            None,
         );
 
         assert!(result.contains("tagged \"team-a\""));
@@ -753,7 +853,16 @@ mod tests {
         insert_instance(&db, "luna", "active", "claude", Some("p0c"));
 
         let result = get_bootstrap(
-            &db, tmp.path(), "luna", "claude", false, true, "", "", false, None,
+            &db,
+            tmp.path(),
+            "luna",
+            "claude",
+            false,
+            true,
+            "",
+            "",
+            false,
+            None,
         );
 
         assert!(result.contains("Your name: p0c-luna"));
@@ -766,7 +875,16 @@ mod tests {
         let (tmp, db) = setup_test_db();
 
         let result = get_bootstrap(
-            &db, tmp.path(), "luna", "claude", false, true, "", "", false, None,
+            &db,
+            tmp.path(),
+            "luna",
+            "claude",
+            false,
+            true,
+            "",
+            "",
+            false,
+            None,
         );
 
         assert!(result.contains("{name}"));
@@ -780,8 +898,7 @@ mod tests {
 
         // Resolve the bundled scripts directory relative to the crate root.
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let bundled_dir = std::path::Path::new(manifest_dir)
-            .join("src/scripts/bundled");
+        let bundled_dir = std::path::Path::new(manifest_dir).join("src/scripts/bundled");
 
         if !bundled_dir.exists() {
             // In CI or worktrees, the scripts source may not be present — skip gracefully.
@@ -798,7 +915,10 @@ mod tests {
         }
         actual.sort();
 
-        let mut expected: Vec<String> = scripts::SCRIPTS.iter().map(|(name, _)| name.to_string()).collect();
+        let mut expected: Vec<String> = scripts::SCRIPTS
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
         expected.sort();
 
         assert_eq!(

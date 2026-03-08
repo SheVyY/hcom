@@ -139,9 +139,7 @@ impl App {
         }
 
         // Ctrl+O in Launch mode: open config
-        if code == KeyCode::Char('o') && ctrl
-            && self.ui.mode == InputMode::Launch
-        {
+        if code == KeyCode::Char('o') && ctrl && self.ui.mode == InputMode::Launch {
             let cmd = "config".to_string();
             let is_inline = self.ui.view_mode == ViewMode::Inline;
             if let Err(e) = self.enqueue_rpc(RpcOp::Command { cmd: cmd.clone() }) {
@@ -1044,7 +1042,11 @@ impl App {
                 let count = self.ui.launch.count;
                 let tag = self.ui.launch.tag.clone();
                 let headless = self.ui.launch.headless;
-                let terminal = self.ui.launch.terminal_presets.get(self.ui.launch.terminal)
+                let terminal = self
+                    .ui
+                    .launch
+                    .terminal_presets
+                    .get(self.ui.launch.terminal)
                     .map(|s| s.as_str())
                     .unwrap_or("auto");
                 let prompt = self.ui.input.clone();

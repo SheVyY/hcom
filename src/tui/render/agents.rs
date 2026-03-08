@@ -837,11 +837,10 @@ fn build_tab_strip(app: &App, width: usize) -> Line<'static> {
         spans.push(Span::raw(" "));
     }
 
-    for i in vis_start..vis_end {
-        if i > vis_start {
+    for (idx, tab) in tabs[vis_start..vis_end].iter().enumerate() {
+        if idx > 0 {
             spans.push(Span::raw("  "));
         }
-        let tab = &tabs[i];
 
         // Background: cursor takes SELECTION; selected gets strong blue bg; indicator gets tint.
         let bg = if tab.is_cursor && tab.is_selected {

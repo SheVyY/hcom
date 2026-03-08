@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use regex::Regex;
 
@@ -74,7 +74,7 @@ pub struct TranscriptSearchArgs {
     /// Max results (default: 20)
     #[arg(long, default_value = "20")]
     pub limit: usize,
-    /// Filter by agent type (claude, gemini, codex)
+    /// Filter by agent type (claude, gemini, codex, opencode)
     #[arg(long)]
     pub agent: Option<String>,
 }
@@ -109,7 +109,11 @@ fn error_patterns() -> &'static Regex {
 
 /// Check if a tool result indicates an error.
 fn is_error_result(result: &Value) -> bool {
-    if result.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if result
+        .get("is_error")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return true;
     }
     let content = result.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -162,8 +166,12 @@ fn extract_edit_info(tool_use_result: &Option<Value>, tool_input: &Value) -> Opt
     // Try toolUseResult first
     if let Some(result) = tool_use_result.as_ref().and_then(|v| v.as_object()) {
         if result.contains_key("structuredPatch") || result.contains_key("oldString") {
-            let file = result.get("filePath").and_then(|v| v.as_str()).unwrap_or("");
-            let diff = if let Some(patch) = result.get("structuredPatch").and_then(|v| v.as_array()) {
+            let file = result
+                .get("filePath")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let diff = if let Some(patch) = result.get("structuredPatch").and_then(|v| v.as_array())
+            {
                 format_structured_patch(patch)
             } else if let (Some(old), Some(new)) = (
                 result.get("oldString").and_then(|v| v.as_str()),
@@ -191,7 +199,9 @@ fn extract_edit_info(tool_use_result: &Option<Value>, tool_input: &Value) -> Opt
             let new_preview = truncate_str(new, 100);
             let old_suffix = if old.len() > 100 { "..." } else { "" };
             let new_suffix = if new.len() > 100 { "..." } else { "" };
-            return Some(json!({"file": file, "diff": format!("-{old_preview}{old_suffix}\n+{new_preview}{new_suffix}")}));
+            return Some(
+                json!({"file": file, "diff": format!("-{old_preview}{old_suffix}\n+{new_preview}{new_suffix}")}),
+            );
         }
     }
 
@@ -257,11 +267,7 @@ fn normalize_tool_name(name: &str) -> &str {
 fn claude_config_dir() -> PathBuf {
     std::env::var("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".claude")
-        })
+        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".claude"))
 }
 
 /// Detect agent type from transcript path.
@@ -277,6 +283,111 @@ fn detect_agent_type(path: &str) -> &str {
     } else {
         "unknown"
     }
+}
+
+fn transcript_search_key(path: &str, session_id: Option<&str>) -> String {
+    format!("{path}\u{0}{}", session_id.unwrap_or(""))
+}
+
+fn transcript_agent_matches(filter: Option<&str>, agent: &str) -> bool {
+    filter.is_none_or(|f| agent.contains(f) || f.contains(agent))
+}
+
+fn get_opencode_db_path() -> Option<PathBuf> {
+    let xdg_data = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{home}/.local/share")
+    });
+    let db_path = PathBuf::from(xdg_data).join("opencode").join("opencode.db");
+    db_path.exists().then_some(db_path)
+}
+
+#[derive(Debug, Clone)]
+struct TranscriptSearchMatch {
+    path: String,
+    agent: String,
+    line: usize,
+    text: String,
+    matches: usize,
+    session_id: Option<String>,
+    label: Option<String>,
+}
+
+fn search_opencode_sessions(
+    db_path: &Path,
+    pattern: &str,
+    limit: usize,
+) -> Result<Vec<TranscriptSearchMatch>, String> {
+    let re = Regex::new(pattern).map_err(|e| format!("Invalid regex: {e}"))?;
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("Cannot open OpenCode DB: {e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.id, s.title, p.data
+             FROM session s
+             JOIN part p ON p.session_id = s.id
+             WHERE json_extract(p.data, '$.type') = 'text'
+             ORDER BY p.time_created ASC",
+        )
+        .map_err(|e| format!("Query error: {e}"))?;
+
+    let mut by_session: std::collections::HashMap<String, TranscriptSearchMatch> =
+        std::collections::HashMap::new();
+    let mut order = Vec::new();
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| format!("Query error: {e}"))?;
+
+    for row in rows {
+        let (session_id, title, data_str) = match row {
+            Ok(row) => row,
+            Err(_) => continue,
+        };
+        let data = match serde_json::from_str::<Value>(&data_str) {
+            Ok(data) => data,
+            Err(_) => continue,
+        };
+        if data
+            .get("synthetic")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        let text = data.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        if text.is_empty() || !re.is_match(text) {
+            continue;
+        }
+
+        let entry = by_session.entry(session_id.clone()).or_insert_with(|| {
+            order.push(session_id.clone());
+            TranscriptSearchMatch {
+                path: db_path.to_string_lossy().to_string(),
+                agent: "opencode".to_string(),
+                line: 0,
+                text: truncate_str(&text.replace('\n', " "), 100).to_string(),
+                matches: 0,
+                session_id: Some(session_id.clone()),
+                label: Some(title.clone()),
+            }
+        });
+        entry.matches += 1;
+    }
+
+    Ok(order
+        .into_iter()
+        .filter_map(|session_id| by_session.remove(&session_id))
+        .take(limit)
+        .collect())
 }
 
 /// Get transcript path for an instance from DB.
@@ -330,7 +441,8 @@ fn parse_claude_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Ex
 
     let mut entries = Vec::new();
     // Map (session_id, tool_use_id) -> {name, input} for matching tool_results to tool_uses
-    let mut tool_use_index: std::collections::HashMap<(String, String), (String, Value)> = std::collections::HashMap::new();
+    let mut tool_use_index: std::collections::HashMap<(String, String), (String, Value)> =
+        std::collections::HashMap::new();
 
     for line in content.lines() {
         let entry: Value = match serde_json::from_str(line) {
@@ -339,29 +451,70 @@ fn parse_claude_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Ex
         };
 
         // Skip meta/system entries
-        if entry.get("isMeta").and_then(|v| v.as_bool()).unwrap_or(false)
-            || entry.get("isCompactSummary").and_then(|v| v.as_bool()).unwrap_or(false)
-            || entry.get("isSidechain").and_then(|v| v.as_bool()).unwrap_or(false)
+        if entry
+            .get("isMeta")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            || entry
+                .get("isCompactSummary")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            || entry
+                .get("isSidechain")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
         {
             continue;
         }
 
-        let entry_type = entry.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let ts = entry.get("timestamp").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let entry_type = entry
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let ts = entry
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         // Skip system-level entry types
-        if matches!(entry_type.as_str(), "summary" | "system" | "result" | "progress" | "file-history-snapshot" | "saved_hook_context") {
+        if matches!(
+            entry_type.as_str(),
+            "summary"
+                | "system"
+                | "result"
+                | "progress"
+                | "file-history-snapshot"
+                | "saved_hook_context"
+        ) {
             continue;
         }
 
         // Build tool_use index from assistant entries
         if entry_type == "assistant" {
-            let session_id = entry.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if let Some(arr) = entry.get("message").and_then(|v| v.get("content")).and_then(|v| v.as_array()) {
+            let session_id = entry
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if let Some(arr) = entry
+                .get("message")
+                .and_then(|v| v.get("content"))
+                .and_then(|v| v.as_array())
+            {
                 for block in arr {
                     if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                        let tool_id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let tool_id = block
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = block
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let input = block.get("input").cloned().unwrap_or(json!({}));
                         tool_use_index.insert((session_id.clone(), tool_id), (name, input));
                     }
@@ -369,7 +522,11 @@ fn parse_claude_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Ex
             }
         }
 
-        entries.push(ParsedEntry { entry_type, ts, data: entry });
+        entries.push(ParsedEntry {
+            entry_type,
+            ts,
+            data: entry,
+        });
     }
 
     // Second pass: build exchanges
@@ -392,14 +549,29 @@ fn parse_claude_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Ex
                 if !has_text {
                     // tool_result-only user entry — process for error detection in detailed mode
                     if detailed {
-                        let session_id = pe.data.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let session_id = pe
+                            .data
+                            .get("sessionId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let tool_use_result = pe.data.get("toolUseResult").cloned();
-                        if let Some(arr) = pe.data.get("message").and_then(|v| v.get("content")).and_then(|v| v.as_array()) {
+                        if let Some(arr) = pe
+                            .data
+                            .get("message")
+                            .and_then(|v| v.get("content"))
+                            .and_then(|v| v.as_array())
+                        {
                             for block in arr {
-                                if block.get("type").and_then(|v| v.as_str()) != Some("tool_result") {
+                                if block.get("type").and_then(|v| v.as_str()) != Some("tool_result")
+                                {
                                     continue;
                                 }
-                                let tool_use_id = block.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let tool_use_id = block
+                                    .get("tool_use_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
                                 let (tool_name, tool_input) = tool_use_index
                                     .get(&(session_id.clone(), tool_use_id.clone()))
                                     .map(|(n, i)| (n.clone(), i.clone()))
@@ -409,17 +581,31 @@ fn parse_claude_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Ex
                                 let normalized = normalize_tool_name(&tool_name);
 
                                 let file = if normalized == "Edit" {
-                                    tool_use_result.as_ref()
+                                    tool_use_result
+                                        .as_ref()
                                         .and_then(|r| r.get("filePath").and_then(|v| v.as_str()))
-                                        .or_else(|| tool_input.get("file_path").and_then(|v| v.as_str()))
-                                        .map(|s| Path::new(s).file_name().and_then(|n| n.to_str()).unwrap_or(s).to_string())
+                                        .or_else(|| {
+                                            tool_input.get("file_path").and_then(|v| v.as_str())
+                                        })
+                                        .map(|s| {
+                                            Path::new(s)
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or(s)
+                                                .to_string()
+                                        })
                                 } else {
                                     None
                                 };
 
                                 let command = if normalized == "Bash" {
-                                    tool_input.get("command").and_then(|v| v.as_str())
-                                        .map(|s| if s.len() > 80 { format!("{}...", truncate_str(s, 77)) } else { s.to_string() })
+                                    tool_input.get("command").and_then(|v| v.as_str()).map(|s| {
+                                        if s.len() > 80 {
+                                            format!("{}...", truncate_str(s, 77))
+                                        } else {
+                                            s.to_string()
+                                        }
+                                    })
                                 } else {
                                     None
                                 };
@@ -433,7 +619,9 @@ fn parse_claude_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Ex
 
                                 // Extract edit info for Edit tools
                                 if normalized == "Edit" {
-                                    if let Some(edit) = extract_edit_info(&tool_use_result, &tool_input) {
+                                    if let Some(edit) =
+                                        extract_edit_info(&tool_use_result, &tool_input)
+                                    {
                                         current_edits.push(edit);
                                     }
                                 }
@@ -472,7 +660,8 @@ fn parse_claude_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Ex
                 }
 
                 // Extract user text
-                current_user = extract_text_content(&pe.data.get("message").cloned().unwrap_or(json!({})));
+                current_user =
+                    extract_text_content(&pe.data.get("message").cloned().unwrap_or(json!({})));
                 current_action = String::new();
                 current_tools = Vec::new();
                 current_files = Vec::new();
@@ -495,18 +684,22 @@ fn parse_claude_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Ex
                                     }
                                     current_action.push_str(text);
                                 }
-                            } else if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                                let tool_name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            } else if block.get("type").and_then(|v| v.as_str()) == Some("tool_use")
+                            {
+                                let tool_name =
+                                    block.get("name").and_then(|v| v.as_str()).unwrap_or("");
                                 let input = block.get("input").cloned().unwrap_or(json!({}));
 
                                 // Extract file from tool input (including notebook_path)
-                                let file = input.get("file_path")
+                                let file = input
+                                    .get("file_path")
                                     .or_else(|| input.get("path"))
                                     .or_else(|| input.get("filePath"))
                                     .or_else(|| input.get("notebook_path"))
                                     .and_then(|v| v.as_str())
                                     .map(|s| {
-                                        Path::new(s).file_name()
+                                        Path::new(s)
+                                            .file_name()
                                             .and_then(|n| n.to_str())
                                             .unwrap_or(s)
                                             .to_string()
@@ -524,7 +717,11 @@ fn parse_claude_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Ex
                                 if !detailed {
                                     let command = if normalize_tool_name(tool_name) == "Bash" {
                                         input.get("command").and_then(|v| v.as_str()).map(|s| {
-                                            if s.len() > 80 { format!("{}...", truncate_str(s, 77)) } else { s.to_string() }
+                                            if s.len() > 80 {
+                                                format!("{}...", truncate_str(s, 77))
+                                            } else {
+                                                s.to_string()
+                                            }
                                         })
                                     } else {
                                         None
@@ -590,8 +787,7 @@ fn dedup_sorted_capped(files: &[String], cap: usize) -> Vec<String> {
 fn parse_gemini_json(path: &Path, last: usize) -> Result<Vec<Exchange>, String> {
     let content = read_file_lossy(path)?;
 
-    let data: Value = serde_json::from_str(&content)
-        .map_err(|e| format!("Invalid JSON: {e}"))?;
+    let data: Value = serde_json::from_str(&content).map_err(|e| format!("Invalid JSON: {e}"))?;
 
     let messages = data
         .get("messages")
@@ -609,7 +805,11 @@ fn parse_gemini_json(path: &Path, last: usize) -> Result<Vec<Exchange>, String> 
 
     for msg in messages {
         let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let ts = msg.get("timestamp").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let ts = msg
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         if msg_type == "user" {
             if !current_user.is_empty() || !current_action.is_empty() {
@@ -668,16 +868,28 @@ fn parse_gemini_json(path: &Path, last: usize) -> Result<Vec<Exchange>, String> 
 
                     let command = if tool_name == "Bash" {
                         args.get("command").and_then(|v| v.as_str()).map(|s| {
-                            if s.len() > 80 { format!("{}...", truncate_str(s, 77)) } else { s.to_string() }
+                            if s.len() > 80 {
+                                format!("{}...", truncate_str(s, 77))
+                            } else {
+                                s.to_string()
+                            }
                         })
                     } else {
                         None
                     };
 
                     let file = args.as_object().and_then(|o| {
-                        o.get("file_path").or(o.get("path")).or(o.get("file"))
+                        o.get("file_path")
+                            .or(o.get("path"))
+                            .or(o.get("file"))
                             .and_then(|v| v.as_str())
-                            .map(|s| Path::new(s).file_name().and_then(|n| n.to_str()).unwrap_or(s).to_string())
+                            .map(|s| {
+                                Path::new(s)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(s)
+                                    .to_string()
+                            })
                     });
 
                     current_tools.push(ToolUse {
@@ -721,7 +933,8 @@ fn parse_codex_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Exc
     let content = read_file_lossy(path)?;
 
     // First pass: build call_id → output map for error detection
-    let mut call_outputs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut call_outputs: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut parsed_lines: Vec<Value> = Vec::new();
 
     for line in content.lines() {
@@ -732,8 +945,16 @@ fn parse_codex_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Exc
         let payload = entry.get("payload").cloned().unwrap_or(entry.clone());
         let payload_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
         if payload_type == "function_call_output" {
-            let call_id = payload.get("call_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let output = payload.get("output").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let call_id = payload
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let output = payload
+                .get("output")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             call_outputs.insert(call_id, output);
         }
         parsed_lines.push(entry);
@@ -751,10 +972,16 @@ fn parse_codex_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Exc
     let mut position = 0;
     let mut in_exchange = false; // track whether we have a real user entry
 
-    let save_exchange = |exchanges: &mut Vec<Exchange>, position: &mut usize, in_exchange: &mut bool,
-                         user: &mut String, action: &mut String, files: &mut Vec<String>,
-                         ts: &mut String, tools: &mut Vec<ToolUse>,
-                         errors: &mut Vec<Value>, last_was_error: &mut bool| {
+    let save_exchange = |exchanges: &mut Vec<Exchange>,
+                         position: &mut usize,
+                         in_exchange: &mut bool,
+                         user: &mut String,
+                         action: &mut String,
+                         files: &mut Vec<String>,
+                         ts: &mut String,
+                         tools: &mut Vec<ToolUse>,
+                         errors: &mut Vec<Value>,
+                         last_was_error: &mut bool| {
         if !user.is_empty() || !action.is_empty() {
             *position += 1;
             exchanges.push(Exchange {
@@ -776,12 +1003,19 @@ fn parse_codex_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Exc
 
     for entry in &parsed_lines {
         let entry_type = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let ts = entry.get("timestamp").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let ts = entry
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let payload = entry.get("payload").cloned().unwrap_or(entry.clone());
         let payload_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
         // Skip system entry types
-        if matches!(entry_type, "session_meta" | "turn_context" | "session_start" | "session_end") {
+        if matches!(
+            entry_type,
+            "session_meta" | "turn_context" | "session_start" | "session_end"
+        ) {
             continue;
         }
 
@@ -796,10 +1030,18 @@ fn parse_codex_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Exc
                         if text.is_empty() {
                             continue;
                         }
-                        save_exchange(&mut exchanges, &mut position, &mut in_exchange,
-                            &mut current_user, &mut current_action, &mut current_files,
-                            &mut current_ts, &mut current_tools, &mut current_errors,
-                            &mut current_last_was_error);
+                        save_exchange(
+                            &mut exchanges,
+                            &mut position,
+                            &mut in_exchange,
+                            &mut current_user,
+                            &mut current_action,
+                            &mut current_files,
+                            &mut current_ts,
+                            &mut current_tools,
+                            &mut current_errors,
+                            &mut current_last_was_error,
+                        );
                         current_user = text;
                         current_ts = ts.clone();
                         in_exchange = true;
@@ -814,18 +1056,29 @@ fn parse_codex_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Exc
                     }
                 }
                 "function_call" => {
-                    let raw_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let raw_name = payload
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
                     let tool_name = normalize_tool_name(raw_name);
-                    let args_str = payload.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
+                    let args_str = payload
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}");
                     let args: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
-                    let call_id = payload.get("call_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let call_id = payload
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
 
                     // Extract files from args
                     if let Some(obj) = args.as_object() {
                         for field in &["file_path", "path", "file"] {
                             if let Some(val) = obj.get(*field).and_then(|v| v.as_str()) {
                                 if !val.is_empty() {
-                                    let fname = Path::new(val).file_name()
+                                    let fname = Path::new(val)
+                                        .file_name()
                                         .and_then(|n| n.to_str())
                                         .unwrap_or(val)
                                         .to_string();
@@ -839,17 +1092,35 @@ fn parse_codex_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Exc
 
                     // Determine is_error from call output
                     let output = call_outputs.get(&call_id).map(|s| s.as_str()).unwrap_or("");
-                    let is_err = if detailed { codex_is_error(output) } else { false };
+                    let is_err = if detailed {
+                        codex_is_error(output)
+                    } else {
+                        false
+                    };
 
                     let command = if tool_name == "Bash" {
                         args.get("command").and_then(|v| v.as_str()).map(|s| {
-                            if s.len() > 80 { format!("{}...", truncate_str(s, 77)) } else { s.to_string() }
+                            if s.len() > 80 {
+                                format!("{}...", truncate_str(s, 77))
+                            } else {
+                                s.to_string()
+                            }
                         })
-                    } else { None };
+                    } else {
+                        None
+                    };
 
                     let file = args.as_object().and_then(|o| {
-                        o.get("file_path").or(o.get("path")).and_then(|v| v.as_str())
-                            .map(|s| Path::new(s).file_name().and_then(|n| n.to_str()).unwrap_or(s).to_string())
+                        o.get("file_path")
+                            .or(o.get("path"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| {
+                                Path::new(s)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(s)
+                                    .to_string()
+                            })
                     });
 
                     current_tools.push(ToolUse {
@@ -881,10 +1152,18 @@ fn parse_codex_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Exc
                     if text.is_empty() {
                         continue;
                     }
-                    save_exchange(&mut exchanges, &mut position, &mut in_exchange,
-                        &mut current_user, &mut current_action, &mut current_files,
-                        &mut current_ts, &mut current_tools, &mut current_errors,
-                        &mut current_last_was_error);
+                    save_exchange(
+                        &mut exchanges,
+                        &mut position,
+                        &mut in_exchange,
+                        &mut current_user,
+                        &mut current_action,
+                        &mut current_files,
+                        &mut current_ts,
+                        &mut current_tools,
+                        &mut current_errors,
+                        &mut current_last_was_error,
+                    );
                     current_user = text;
                     current_ts = ts.clone();
                     in_exchange = true;
@@ -904,10 +1183,18 @@ fn parse_codex_jsonl(path: &Path, last: usize, detailed: bool) -> Result<Vec<Exc
     }
 
     // Last exchange
-    save_exchange(&mut exchanges, &mut position, &mut in_exchange,
-        &mut current_user, &mut current_action, &mut current_files,
-        &mut current_ts, &mut current_tools, &mut current_errors,
-        &mut current_last_was_error);
+    save_exchange(
+        &mut exchanges,
+        &mut position,
+        &mut in_exchange,
+        &mut current_user,
+        &mut current_action,
+        &mut current_files,
+        &mut current_ts,
+        &mut current_tools,
+        &mut current_errors,
+        &mut current_last_was_error,
+    );
 
     if exchanges.len() > last {
         let start = exchanges.len() - last;
@@ -927,7 +1214,11 @@ fn has_user_text(msg: &Value) -> bool {
     if let Some(arr) = content.and_then(|v| v.as_array()) {
         return arr.iter().any(|block| {
             block.get("type").and_then(|v| v.as_str()) == Some("text")
-                && block.get("text").and_then(|v| v.as_str()).map(|s| !s.trim().is_empty()).unwrap_or(false)
+                && block
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
         });
     }
     false
@@ -993,46 +1284,73 @@ fn extract_text_content(msg: &Value) -> String {
         return parts.join("\n");
     }
     // Fallback: look for text directly
-    msg.get("text").and_then(|v| v.as_str()).unwrap_or("").trim().to_string()
+    msg.get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 /// Parse OpenCode SQLite transcript database.
 ///
 /// OpenCode stores conversations in `opencode.db` with `message` and `part` tables.
 /// Messages have role in their JSON `data` column; parts contain text, tool calls, etc.
-fn parse_opencode_sqlite(db_path: &Path, session_id: &str, last: usize) -> Result<Vec<Exchange>, String> {
-    let conn = rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ).map_err(|e| format!("Cannot open OpenCode DB: {e}"))?;
+fn parse_opencode_sqlite(
+    db_path: &Path,
+    session_id: &str,
+    last: usize,
+) -> Result<Vec<Exchange>, String> {
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("Cannot open OpenCode DB: {e}"))?;
 
     // Fetch messages for this session (include time_created for timestamp)
     let mut stmt = conn.prepare(
         "SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created ASC"
     ).map_err(|e| format!("Query error: {e}"))?;
 
-    struct MsgRow { id: String, _data: Value, role: String, time_created: i64 }
+    struct MsgRow {
+        id: String,
+        _data: Value,
+        role: String,
+        time_created: i64,
+    }
 
-    let messages: Vec<MsgRow> = stmt.query_map(rusqlite::params![session_id], |row| {
-        let id: String = row.get(0)?;
-        let data_str: String = row.get(1)?;
-        let time_created: i64 = row.get::<_, i64>(2).unwrap_or(0);
-        Ok((id, data_str, time_created))
-    }).map_err(|e| format!("Query error: {e}"))?
-    .filter_map(|r| r.ok())
-    .filter_map(|(id, data_str, time_created)| {
-        match serde_json::from_str::<Value>(&data_str) {
-            Ok(data) => {
-                let role = data.get("role").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-                Some(MsgRow { id, _data: data, role, time_created })
-            }
-            Err(e) => {
-                log_warn("transcript", "opencode_parse", &format!("skipping message {id}: invalid JSON in data column: {e}"));
-                None
-            }
-        }
-    })
-    .collect();
+    let messages: Vec<MsgRow> = stmt
+        .query_map(rusqlite::params![session_id], |row| {
+            let id: String = row.get(0)?;
+            let data_str: String = row.get(1)?;
+            let time_created: i64 = row.get::<_, i64>(2).unwrap_or(0);
+            Ok((id, data_str, time_created))
+        })
+        .map_err(|e| format!("Query error: {e}"))?
+        .filter_map(|r| r.ok())
+        .filter_map(
+            |(id, data_str, time_created)| match serde_json::from_str::<Value>(&data_str) {
+                Ok(data) => {
+                    let role = data
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    Some(MsgRow {
+                        id,
+                        _data: data,
+                        role,
+                        time_created,
+                    })
+                }
+                Err(e) => {
+                    log_warn(
+                        "transcript",
+                        "opencode_parse",
+                        &format!("skipping message {id}: invalid JSON in data column: {e}"),
+                    );
+                    None
+                }
+            },
+        )
+        .collect();
 
     if messages.is_empty() {
         return Ok(Vec::new());
@@ -1040,14 +1358,15 @@ fn parse_opencode_sqlite(db_path: &Path, session_id: &str, last: usize) -> Resul
 
     // Prefetch parts keyed by message_id.
     // Query per message_id to avoid dependency on part.session_id column.
-    let mut parts_by_msg: std::collections::HashMap<String, Vec<Value>> = std::collections::HashMap::new();
+    let mut parts_by_msg: std::collections::HashMap<String, Vec<Value>> =
+        std::collections::HashMap::new();
     for msg in &messages {
-        if let Ok(mut parts_stmt) = conn.prepare(
-            "SELECT data FROM part WHERE message_id = ? ORDER BY id ASC"
-        ) {
-            if let Ok(rows) = parts_stmt.query_map(rusqlite::params![msg.id], |row| {
-                row.get::<_, String>(0)
-            }) {
+        if let Ok(mut parts_stmt) =
+            conn.prepare("SELECT data FROM part WHERE message_id = ? ORDER BY id ASC")
+        {
+            if let Ok(rows) =
+                parts_stmt.query_map(rusqlite::params![msg.id], |row| row.get::<_, String>(0))
+            {
                 for data_str in rows.flatten() {
                     if let Ok(v) = serde_json::from_str::<Value>(&data_str) {
                         parts_by_msg.entry(msg.id.clone()).or_default().push(v);
@@ -1064,12 +1383,21 @@ fn parse_opencode_sqlite(db_path: &Path, session_id: &str, last: usize) -> Resul
     // Find user message indices (with actual text)
     let mut user_indices: Vec<usize> = Vec::new();
     for (i, msg) in messages.iter().enumerate() {
-        if msg.role != "user" { continue; }
+        if msg.role != "user" {
+            continue;
+        }
         let parts = parts_by_msg.get(&msg.id).cloned().unwrap_or_default();
         let has_text = parts.iter().any(|p| {
             p.get("type").and_then(|v| v.as_str()) == Some("text")
-            && !p.get("synthetic").and_then(|v| v.as_bool()).unwrap_or(false)
-            && !p.get("text").and_then(|v| v.as_str()).unwrap_or("").is_empty()
+                && !p
+                    .get("synthetic")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                && !p
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
         });
         if has_text {
             user_indices.push(i);
@@ -1077,15 +1405,22 @@ fn parse_opencode_sqlite(db_path: &Path, session_id: &str, last: usize) -> Resul
     }
 
     for (ui_pos, &user_idx) in user_indices.iter().enumerate() {
-        let next_user_idx = user_indices.get(ui_pos + 1).copied().unwrap_or(messages.len());
+        let next_user_idx = user_indices
+            .get(ui_pos + 1)
+            .copied()
+            .unwrap_or(messages.len());
         let user_msg = &messages[user_idx];
         let user_parts = parts_by_msg.get(&user_msg.id).cloned().unwrap_or_default();
 
         // Extract user text
-        let user_text: String = user_parts.iter()
+        let user_text: String = user_parts
+            .iter()
             .filter(|p| {
                 p.get("type").and_then(|v| v.as_str()) == Some("text")
-                && !p.get("synthetic").and_then(|v| v.as_bool()).unwrap_or(false)
+                    && !p
+                        .get("synthetic")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
             })
             .filter_map(|p| p.get("text").and_then(|v| v.as_str()))
             .filter(|t| !t.is_empty())
@@ -1107,7 +1442,9 @@ fn parse_opencode_sqlite(db_path: &Path, session_id: &str, last: usize) -> Resul
         let mut tools: Vec<ToolUse> = Vec::new();
 
         for msg in &messages[(user_idx + 1)..next_user_idx] {
-            if msg.role != "assistant" { continue; }
+            if msg.role != "assistant" {
+                continue;
+            }
             let msg_parts = parts_by_msg.get(&msg.id).cloned().unwrap_or_default();
             for p in &msg_parts {
                 let ptype = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -1145,15 +1482,32 @@ fn parse_opencode_sqlite(db_path: &Path, session_id: &str, last: usize) -> Resul
                         }
 
                         let command = if normalized == "Bash" {
-                            input.get("command").and_then(|v| v.as_str()).map(|s| s.to_string())
-                        } else { None };
-                        let file = input.get("file_path")
+                            input
+                                .get("command")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        } else {
+                            None
+                        };
+                        let file = input
+                            .get("file_path")
                             .or_else(|| input.get("filePath"))
                             .or_else(|| input.get("path"))
                             .and_then(|v| v.as_str())
-                            .map(|s| Path::new(s).file_name().and_then(|n| n.to_str()).unwrap_or(s).to_string());
+                            .map(|s| {
+                                Path::new(s)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(s)
+                                    .to_string()
+                            });
 
-                        tools.push(ToolUse { name: normalized.to_string(), is_error: is_err, file, command });
+                        tools.push(ToolUse {
+                            name: normalized.to_string(),
+                            is_error: is_err,
+                            file,
+                            command,
+                        });
                     }
                     _ => {}
                 }
@@ -1161,11 +1515,16 @@ fn parse_opencode_sqlite(db_path: &Path, session_id: &str, last: usize) -> Resul
         }
 
         position += 1;
-        let action = if action_parts.is_empty() { "(no response)".to_string() } else { action_parts.join("\n") };
+        let action = if action_parts.is_empty() {
+            "(no response)".to_string()
+        } else {
+            action_parts.join("\n")
+        };
         files.truncate(5);
 
         // Collect errors from tools with is_error
-        let errors: Vec<Value> = tools.iter()
+        let errors: Vec<Value> = tools
+            .iter()
             .filter(|t| t.is_error)
             .map(|t| json!({"tool": t.name, "content": ""}))
             .collect();
@@ -1195,13 +1554,18 @@ fn parse_opencode_sqlite(db_path: &Path, session_id: &str, last: usize) -> Resul
 
 /// Read file to string with lossy UTF-8 conversion (handles binary/corrupted files).
 fn read_file_lossy(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("Cannot read transcript: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("Cannot read transcript: {e}"))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Get exchanges from a transcript file.
-fn get_exchanges(path: &str, agent: &str, last: usize, detailed: bool, session_id: Option<&str>) -> Result<Vec<Exchange>, String> {
+fn get_exchanges(
+    path: &str,
+    agent: &str,
+    last: usize,
+    detailed: bool,
+    session_id: Option<&str>,
+) -> Result<Vec<Exchange>, String> {
     let p = Path::new(path);
     if !p.exists() {
         return Err(format!("Transcript not found: {path}"));
@@ -1281,7 +1645,10 @@ fn format_exchanges(exchanges: &[Exchange], _instance: &str, full: bool, detaile
         if !full {
             lines.push("Note: Output truncated. Use --full for full text.".to_string());
         } else {
-            lines.push("Note: Tool outputs & file edits hidden. Use --detailed for full details.".to_string());
+            lines.push(
+                "Note: Tool outputs & file edits hidden. Use --detailed for full details."
+                    .to_string(),
+            );
         }
     }
 
@@ -1323,20 +1690,35 @@ fn summarize_action(text: &str) -> String {
 
 /// Correlate transcript file paths to hcom agent names via DB queries.
 /// Checks instances table first, then stopped life events.
-fn correlate_paths_to_hcom(db: &HcomDb, paths: &[String]) -> std::collections::HashMap<String, String> {
+fn correlate_paths_to_hcom(
+    db: &HcomDb,
+    targets: &[(String, Option<String>)],
+) -> std::collections::HashMap<String, String> {
     let mut result = std::collections::HashMap::new();
     let conn = db.conn();
+    let target_keys: std::collections::HashSet<String> = targets
+        .iter()
+        .map(|(path, session_id)| transcript_search_key(path, session_id.as_deref()))
+        .collect();
 
     // 1. Check current instances
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT name, transcript_path FROM instances WHERE transcript_path IS NOT NULL"
-    ) {
+        "SELECT name, transcript_path, session_id
+         FROM instances
+         WHERE transcript_path IS NOT NULL",
+    )
+    {
         if let Ok(rows) = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
         }) {
-            for (name, tp) in rows.flatten() {
-                if paths.contains(&tp) {
-                    result.insert(tp, name);
+            for (name, tp, session_id) in rows.flatten() {
+                let key = transcript_search_key(&tp, session_id.as_deref());
+                if target_keys.contains(&key) {
+                    result.insert(key, name);
                 }
             }
         }
@@ -1344,18 +1726,25 @@ fn correlate_paths_to_hcom(db: &HcomDb, paths: &[String]) -> std::collections::H
 
     // 2. Check stopped events for paths not yet matched
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT instance, json_extract(data, '$.snapshot.transcript_path') as tp \
+        "SELECT instance,
+                json_extract(data, '$.snapshot.transcript_path') as tp,
+                json_extract(data, '$.snapshot.session_id') as session_id \
          FROM events WHERE type = 'life' \
          AND json_extract(data, '$.action') = 'stopped' \
          AND json_extract(data, '$.snapshot.transcript_path') IS NOT NULL \
-         ORDER BY id DESC"
+         ORDER BY id DESC",
     ) {
         if let Ok(rows) = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
         }) {
-            for (name, tp) in rows.flatten() {
-                if paths.contains(&tp) && !result.contains_key(&tp) {
-                    result.insert(tp, name);
+            for (name, tp, session_id) in rows.flatten() {
+                let key = transcript_search_key(&tp, session_id.as_deref());
+                if target_keys.contains(&key) && !result.contains_key(&key) {
+                    result.insert(key, name);
                 }
             }
         }
@@ -1365,7 +1754,11 @@ fn correlate_paths_to_hcom(db: &HcomDb, paths: &[String]) -> std::collections::H
 }
 
 /// Search across transcripts: `hcom transcript search "pattern" [--live] [--all] [--limit N] [--exclude-self]`
-fn cmd_transcript_search(db: &HcomDb, args: &TranscriptSearchArgs, ctx: Option<&CommandContext>) -> i32 {
+fn cmd_transcript_search(
+    db: &HcomDb,
+    args: &TranscriptSearchArgs,
+    ctx: Option<&CommandContext>,
+) -> i32 {
     let live_mode = args.live;
     let all_mode = args.all;
     let json_mode = args.json;
@@ -1389,29 +1782,41 @@ fn cmd_transcript_search(db: &HcomDb, args: &TranscriptSearchArgs, ctx: Option<&
 
     if all_mode {
         // --all: search disk-wide directories (not just hcom-tracked instances)
-        let home = dirs::home_dir().unwrap_or_default();
         let mut search_dirs: Vec<PathBuf> = Vec::new();
+        let agent_filter = agent_filter.map(|s| s.as_str());
+        let opencode_db = if transcript_agent_matches(agent_filter, "opencode") {
+            get_opencode_db_path()
+        } else {
+            None
+        };
 
-        if agent_filter.is_none() || agent_filter.map(|s| s.as_str()).is_some_and(|f| "claude".contains(f) || f.contains("claude")) {
+        if transcript_agent_matches(agent_filter, "claude") {
             let p = claude_config_dir().join("projects");
-            if p.exists() { search_dirs.push(p); }
+            if p.exists() {
+                search_dirs.push(p);
+            }
         }
-        if agent_filter.is_none() || agent_filter.map(|s| s.as_str()).is_some_and(|f| "gemini".contains(f) || f.contains("gemini")) {
+        if transcript_agent_matches(agent_filter, "gemini") {
+            let home = dirs::home_dir().unwrap_or_default();
             let p = home.join(".gemini");
-            if p.exists() { search_dirs.push(p); }
+            if p.exists() {
+                search_dirs.push(p);
+            }
         }
-        if agent_filter.is_none() || agent_filter.map(|s| s.as_str()).is_some_and(|f| "codex".contains(f) || f.contains("codex")) {
+        if transcript_agent_matches(agent_filter, "codex") {
+            let home = dirs::home_dir().unwrap_or_default();
             let p = home.join(".codex").join("sessions");
-            if p.exists() { search_dirs.push(p); }
+            if p.exists() {
+                search_dirs.push(p);
+            }
         }
 
-        if search_dirs.is_empty() {
+        if search_dirs.is_empty() && opencode_db.is_none() {
             println!("No transcript directories found on disk.");
             return 0;
         }
 
         // Phase 1: find matching files with rg -l (recursive, *.jsonl/*.json)
-        // TODO: rg can't search inside OpenCode's SQLite DB — opencode transcripts are skipped in --all mode
         let mut cmd = std::process::Command::new("rg");
         cmd.args(["-l", "--glob", "*.jsonl", "--glob", "*.json", pattern]);
         for d in &search_dirs {
@@ -1419,17 +1824,28 @@ fn cmd_transcript_search(db: &HcomDb, args: &TranscriptSearchArgs, ctx: Option<&
         }
         let output = cmd.output();
         let matching_files: Vec<String> = match output {
-            Ok(out) if out.status.success() => {
-                String::from_utf8_lossy(&out.stdout)
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(|l| l.to_string())
-                    .collect()
-            }
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| l.to_string())
+                .collect(),
             _ => Vec::new(),
         };
 
-        if matching_files.is_empty() {
+        let opencode_matches = opencode_db
+            .as_deref()
+            .map(|db_path| search_opencode_sessions(db_path, pattern, limit))
+            .transpose();
+        let opencode_matches = match opencode_matches {
+            Ok(Some(matches)) => matches,
+            Ok(None) => Vec::new(),
+            Err(err) => {
+                eprintln!("Error: {err}");
+                return 1;
+            }
+        };
+
+        if matching_files.is_empty() && opencode_matches.is_empty() {
             if json_mode {
                 println!("{}", json!({"count": 0, "results": [], "scope": "all"}));
             } else {
@@ -1438,25 +1854,47 @@ fn cmd_transcript_search(db: &HcomDb, args: &TranscriptSearchArgs, ctx: Option<&
             return 0;
         }
 
-        // Correlate transcript paths to hcom names via DB
-        let path_to_hcom = correlate_paths_to_hcom(db, &matching_files);
+        // Correlate transcript paths/session IDs to hcom names via DB.
+        let mut targets: Vec<(String, Option<String>)> = matching_files
+            .iter()
+            .cloned()
+            .map(|path| (path, None))
+            .collect();
+        targets.extend(
+            opencode_matches
+                .iter()
+                .filter_map(|m| m.session_id.clone().map(|sid| (m.path.clone(), Some(sid)))),
+        );
+        let path_to_hcom = correlate_paths_to_hcom(db, &targets);
 
-        // Phase 2: extract line-level matches from each file
+        // Extract line-level matches from each file
         let mut results = Vec::new();
         for file_path in &matching_files {
-            if results.len() >= limit { break; }
+            if results.len() >= limit {
+                break;
+            }
             let agent = detect_agent_type(file_path);
             if let Some(af) = agent_filter {
-                if !agent.contains(af.as_str()) { continue; }
+                if !agent.contains(af) {
+                    continue;
+                }
             }
             let hcom_name = path_to_hcom
-                .get(file_path.as_str())
+                .get(&transcript_search_key(file_path, None))
                 .cloned()
                 .unwrap_or_default();
 
             let remaining = limit - results.len();
             let out = std::process::Command::new("rg")
-                .args(["-n", "--max-count", &remaining.to_string(), "--max-columns", "500", pattern, file_path])
+                .args([
+                    "-n",
+                    "--max-count",
+                    &remaining.to_string(),
+                    "--max-columns",
+                    "500",
+                    pattern,
+                    file_path,
+                ])
                 .output();
             if let Ok(out) = out {
                 if out.status.success() {
@@ -1487,24 +1925,76 @@ fn cmd_transcript_search(db: &HcomDb, args: &TranscriptSearchArgs, ctx: Option<&
             }
         }
 
+        for opencode_match in &opencode_matches {
+            if results.len() >= limit {
+                break;
+            }
+            let hcom_name = path_to_hcom
+                .get(&transcript_search_key(
+                    &opencode_match.path,
+                    opencode_match.session_id.as_deref(),
+                ))
+                .cloned()
+                .unwrap_or_default();
+            results.push(json!({
+                "hcom_name": if hcom_name.is_empty() { serde_json::Value::Null } else { json!(hcom_name) },
+                "agent": opencode_match.agent,
+                "path": opencode_match.path,
+                "line": opencode_match.line,
+                "text": opencode_match.text,
+                "matches": opencode_match.matches,
+                "session_id": opencode_match.session_id,
+                "label": opencode_match.label,
+            }));
+        }
+
         let scope_label = "";
         if json_mode {
-            println!("{}", json!({"count": results.len(), "results": results, "scope": "all"}));
+            println!(
+                "{}",
+                json!({"count": results.len(), "results": results, "scope": "all"})
+            );
         } else {
             if results.is_empty() {
                 println!("No matches for \"{pattern}\"");
             } else {
                 let _ = scope_label;
-                println!("Found matches in {} transcripts (all on disk):", results.len());
+                println!(
+                    "Found matches in {} transcripts (all on disk):",
+                    results.len()
+                );
                 for r in &results {
                     let path = r["path"].as_str().unwrap_or("");
                     let agent = r["agent"].as_str().unwrap_or("?");
                     let line = r["line"].as_u64().unwrap_or(0);
                     let matches = r["matches"].as_u64().unwrap_or(0);
                     let snippet = r["text"].as_str().unwrap_or("");
-                    let short_path = path.split('/').rev().take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/");
-                    let name_part = r["hcom_name"].as_str().map(|n| format!(" ({n})")).unwrap_or_default();
+                    let label = r["label"].as_str().unwrap_or("");
+                    let session_id = r["session_id"].as_str().unwrap_or("");
+                    let short_path = path
+                        .split('/')
+                        .rev()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    let name_part = r["hcom_name"]
+                        .as_str()
+                        .map(|n| format!(" ({n})"))
+                        .unwrap_or_default();
                     println!("  [{agent}]{name_part} .../{short_path}:{line}  ({matches} matches)");
+                    if !label.is_empty() || !session_id.is_empty() {
+                        let mut details = Vec::new();
+                        if !label.is_empty() {
+                            details.push(label.to_string());
+                        }
+                        if !session_id.is_empty() {
+                            details.push(session_id.to_string());
+                        }
+                        println!("    {}", details.join(" | "));
+                    }
                     if !snippet.is_empty() {
                         println!("    {snippet}");
                     }
@@ -1571,7 +2061,15 @@ fn cmd_transcript_search(db: &HcomDb, args: &TranscriptSearchArgs, ctx: Option<&
         // Use rg for line-level matches with context
         let remaining = limit - results.len();
         let output = std::process::Command::new("rg")
-            .args(["-n", "--max-count", &remaining.to_string(), "--max-columns", "500", pattern, path])
+            .args([
+                "-n",
+                "--max-count",
+                &remaining.to_string(),
+                "--max-columns",
+                "500",
+                pattern,
+                path,
+            ])
             .output()
             .or_else(|_| {
                 std::process::Command::new("grep")
@@ -1613,10 +2111,19 @@ fn cmd_transcript_search(db: &HcomDb, args: &TranscriptSearchArgs, ctx: Option<&
         }
     }
 
-    let scope_label = if live_mode { " (live agents)" } else if all_mode { "" } else { " (hcom-tracked)" };
+    let scope_label = if live_mode {
+        " (live agents)"
+    } else if all_mode {
+        ""
+    } else {
+        " (hcom-tracked)"
+    };
 
     if json_mode {
-        println!("{}", json!({"count": results.len(), "results": results, "scope": if live_mode {"live"} else if all_mode {"all"} else {"hcom"}}));
+        println!(
+            "{}",
+            json!({"count": results.len(), "results": results, "scope": if live_mode {"live"} else if all_mode {"all"} else {"hcom"}})
+        );
     } else {
         if results.is_empty() {
             println!("No matches for \"{pattern}\"");
@@ -1624,12 +2131,19 @@ fn cmd_transcript_search(db: &HcomDb, args: &TranscriptSearchArgs, ctx: Option<&
         }
         let limit_hit = results.len() >= limit;
         if limit_hit {
-            println!("Showing {} matches (limit {}){scope_label}:\n", results.len(), limit);
+            println!(
+                "Showing {} matches (limit {}){scope_label}:\n",
+                results.len(),
+                limit
+            );
         } else {
             println!("Found {} matches{scope_label}:\n", results.len());
         }
         for result in &results {
-            let hcom_name = result.get("hcom_name").and_then(|v| v.as_str()).unwrap_or("");
+            let hcom_name = result
+                .get("hcom_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let agent = result.get("agent").and_then(|v| v.as_str()).unwrap_or("");
             let path = result.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let line = result.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1637,7 +2151,9 @@ fn cmd_transcript_search(db: &HcomDb, args: &TranscriptSearchArgs, ctx: Option<&
 
             let path_display = if path.len() > 60 {
                 let mut start = path.len() - 57;
-                while start < path.len() && !path.is_char_boundary(start) { start += 1; }
+                while start < path.len() && !path.is_char_boundary(start) {
+                    start += 1;
+                }
                 format!("...{}", &path[start..])
             } else {
                 path.to_string()
@@ -1742,7 +2258,10 @@ fn cmd_transcript_timeline(db: &HcomDb, args: &TranscriptTimelineArgs) -> i32 {
     }
 
     if json_mode {
-        println!("{}", serde_json::to_string_pretty(&all_entries).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&all_entries).unwrap_or_default()
+        );
         return 0;
     }
 
@@ -1755,7 +2274,10 @@ fn cmd_transcript_timeline(db: &HcomDb, args: &TranscriptTimelineArgs) -> i32 {
     println!("Timeline ({} exchanges):\n", all_entries.len());
     for entry in &all_entries {
         let inst = entry.get("instance").and_then(|v| v.as_str()).unwrap_or("");
-        let ts = entry.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+        let ts = entry
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let user = entry.get("user").and_then(|v| v.as_str()).unwrap_or("");
         let action = entry.get("action").and_then(|v| v.as_str()).unwrap_or("");
         let files = entry.get("files").and_then(|v| v.as_array());
@@ -1795,17 +2317,17 @@ fn cmd_transcript_timeline(db: &HcomDb, args: &TranscriptTimelineArgs) -> i32 {
         }
 
         if let Some(file_arr) = files {
-            let file_strs: Vec<&str> = file_arr.iter()
-                .take(5)
-                .filter_map(|v| v.as_str())
-                .collect();
+            let file_strs: Vec<&str> = file_arr.iter().take(5).filter_map(|v| v.as_str()).collect();
             if !file_strs.is_empty() {
                 println!("  Files: {}", file_strs.join(", "));
             }
         }
 
         // Command line (instance reference for navigation)
-        println!("  hcom transcript @{inst} {}", entry.get("position").and_then(|v| v.as_u64()).unwrap_or(1));
+        println!(
+            "  hcom transcript @{inst} {}",
+            entry.get("position").and_then(|v| v.as_u64()).unwrap_or(1)
+        );
         println!();
     }
 
@@ -1839,7 +2361,9 @@ pub fn cmd_transcript(db: &HcomDb, args: &TranscriptArgs, ctx: Option<&CommandCo
     if let Some(ref name) = args.name {
         let stripped = name.strip_prefix('@').unwrap_or(name);
         // Check if it looks like a range (digits and hyphens)
-        if stripped.chars().all(|c| c.is_ascii_digit() || c == '-') && stripped.chars().any(|c| c.is_ascii_digit()) {
+        if stripped.chars().all(|c| c.is_ascii_digit() || c == '-')
+            && stripped.chars().any(|c| c.is_ascii_digit())
+        {
             if range_str.is_none() {
                 range_str = Some(stripped.to_string());
             }
@@ -1887,8 +2411,18 @@ pub fn cmd_transcript(db: &HcomDb, args: &TranscriptArgs, ctx: Option<&CommandCo
     };
 
     // Get exchanges
-    let effective_last = if range_start.is_some() { usize::MAX } else { last_n };
-    let exchanges = match get_exchanges(&transcript_path, &agent_type, effective_last, detailed, session_id.as_deref()) {
+    let effective_last = if range_start.is_some() {
+        usize::MAX
+    } else {
+        last_n
+    };
+    let exchanges = match get_exchanges(
+        &transcript_path,
+        &agent_type,
+        effective_last,
+        detailed,
+        session_id.as_deref(),
+    ) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -1919,19 +2453,24 @@ pub fn cmd_transcript(db: &HcomDb, args: &TranscriptArgs, ctx: Option<&CommandCo
                     "timestamp": ex.timestamp,
                 });
                 if detailed {
-                    obj["tools"] = json!(ex.tools.iter().map(|t| {
-                        let mut tool = json!({
-                            "name": t.name,
-                            "is_error": t.is_error,
-                        });
-                        if let Some(ref f) = t.file {
-                            tool["file"] = json!(f);
-                        }
-                        if let Some(ref c) = t.command {
-                            tool["command"] = json!(c);
-                        }
-                        tool
-                    }).collect::<Vec<_>>());
+                    obj["tools"] = json!(
+                        ex.tools
+                            .iter()
+                            .map(|t| {
+                                let mut tool = json!({
+                                    "name": t.name,
+                                    "is_error": t.is_error,
+                                });
+                                if let Some(ref f) = t.file {
+                                    tool["file"] = json!(f);
+                                }
+                                if let Some(ref c) = t.command {
+                                    tool["command"] = json!(c);
+                                }
+                                tool
+                            })
+                            .collect::<Vec<_>>()
+                    );
                     obj["edits"] = json!(ex.edits);
                     obj["errors"] = json!(ex.errors);
                     obj["ended_on_error"] = json!(ex.ended_on_error);
@@ -1939,7 +2478,10 @@ pub fn cmd_transcript(db: &HcomDb, args: &TranscriptArgs, ctx: Option<&CommandCo
                 obj
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&json_output).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+        );
         return 0;
     }
 
@@ -1968,24 +2510,30 @@ pub fn cmd_transcript(db: &HcomDb, args: &TranscriptArgs, ctx: Option<&CommandCo
 }
 
 /// Resolve instance name to (name, transcript_path, agent_type, session_id).
-fn resolve_instance_transcript(db: &HcomDb, name: &str) -> Option<(String, String, String, Option<String>)> {
+fn resolve_instance_transcript(
+    db: &HcomDb,
+    name: &str,
+) -> Option<(String, String, String, Option<String>)> {
+    let name = crate::instances::resolve_display_name_or_stopped(db, name)
+        .unwrap_or_else(|| name.to_string());
+
     // Direct match
-    if let Some(path) = get_transcript_path(db, name) {
+    if let Some(path) = get_transcript_path(db, &name) {
         let (tool, sid) = db
             .conn()
             .query_row(
                 "SELECT tool, session_id FROM instances WHERE name = ?",
-                rusqlite::params![name],
+                rusqlite::params![&name],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .unwrap_or_else(|_| (detect_agent_type(&path).to_string(), None));
-        return Some((name.to_string(), path, tool, sid));
+        return Some((name, path, tool, sid));
     }
 
     // Prefix match
     if let Ok((matched_name, path, tool, sid)) = db.conn().query_row(
         "SELECT name, transcript_path, tool, session_id FROM instances WHERE name LIKE ? AND transcript_path IS NOT NULL AND transcript_path != '' LIMIT 1",
-        rusqlite::params![format!("{name}%")],
+        rusqlite::params![format!("{}%", name)],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?)),
     ) {
         return Some((matched_name, path, tool, sid));
@@ -1994,11 +2542,11 @@ fn resolve_instance_transcript(db: &HcomDb, name: &str) -> Option<(String, Strin
     // Check stopped events (session_id from snapshot)
     if let Ok((path, sid)) = db.conn().query_row(
         "SELECT json_extract(data, '$.snapshot.transcript_path'), json_extract(data, '$.snapshot.session_id') FROM events WHERE type = 'life' AND instance = ? AND json_extract(data, '$.action') = 'stopped' ORDER BY id DESC LIMIT 1",
-        rusqlite::params![name],
+        rusqlite::params![&name],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
     ) {
         let agent = detect_agent_type(&path).to_string();
-        return Some((name.to_string(), path, agent, sid));
+        return Some((name, path, agent, sid));
     }
 
     None
@@ -2037,19 +2585,26 @@ pub struct TranscriptQuery<'a> {
 /// Public wrapper for get_exchanges (used by bundle prepare/cat).
 pub fn get_exchanges_pub(q: &TranscriptQuery) -> Result<Vec<Value>, String> {
     let exchanges = get_exchanges(q.path, q.agent, q.last, q.detailed, q.session_id)?;
-    Ok(exchanges.iter().map(|ex| {
-        json!({
-            "position": ex.position,
-            "user": ex.user,
-            "action": ex.action,
-            "files": ex.files,
-            "timestamp": ex.timestamp,
+    Ok(exchanges
+        .iter()
+        .map(|ex| {
+            json!({
+                "position": ex.position,
+                "user": ex.user,
+                "action": ex.action,
+                "files": ex.files,
+                "timestamp": ex.timestamp,
+            })
         })
-    }).collect())
+        .collect())
 }
 
 /// Public wrapper for format_exchanges (used by bundle cat).
-pub fn format_exchanges_pub(q: &TranscriptQuery, instance: &str, full: bool) -> Result<String, String> {
+pub fn format_exchanges_pub(
+    q: &TranscriptQuery,
+    instance: &str,
+    full: bool,
+) -> Result<String, String> {
     let exchanges = get_exchanges(q.path, q.agent, q.last, q.detailed, q.session_id)?;
     Ok(format_exchanges(&exchanges, instance, full, q.detailed))
 }
@@ -2110,9 +2665,148 @@ mod tests {
 
     #[test]
     fn test_detect_agent_type() {
-        assert_eq!(detect_agent_type("/home/user/.claude/projects/x/transcript.jsonl"), "claude");
-        assert_eq!(detect_agent_type("/home/user/.gemini/tmp/session.json"), "gemini");
-        assert_eq!(detect_agent_type("/home/user/.codex/sessions/x/rollout.jsonl"), "codex");
+        assert_eq!(
+            detect_agent_type("/home/user/.claude/projects/x/transcript.jsonl"),
+            "claude"
+        );
+        assert_eq!(
+            detect_agent_type("/home/user/.gemini/tmp/session.json"),
+            "gemini"
+        );
+        assert_eq!(
+            detect_agent_type("/home/user/.codex/sessions/x/rollout.jsonl"),
+            "codex"
+        );
+        assert_eq!(
+            detect_agent_type("/home/user/.local/share/opencode/opencode.db"),
+            "opencode"
+        );
+    }
+
+    #[test]
+    fn test_search_opencode_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id text PRIMARY KEY, title text NOT NULL);
+             CREATE TABLE part (
+                 id text PRIMARY KEY,
+                 message_id text NOT NULL,
+                 session_id text NOT NULL,
+                 time_created integer NOT NULL,
+                 time_updated integer NOT NULL,
+                 data text NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, title) VALUES (?, ?)",
+            rusqlite::params!["ses_1", "Match Session"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, title) VALUES (?, ?)",
+            rusqlite::params!["ses_2", "No Match Session"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                "part_1",
+                "msg_1",
+                "ses_1",
+                1_i64,
+                1_i64,
+                json!({"type": "text", "text": "first needle hit"}).to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                "part_2",
+                "msg_2",
+                "ses_1",
+                2_i64,
+                2_i64,
+                json!({"type": "text", "text": "second needle hit"}).to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                "part_3",
+                "msg_3",
+                "ses_2",
+                3_i64,
+                3_i64,
+                json!({"type": "text", "text": "plain text"}).to_string()
+            ],
+        )
+        .unwrap();
+
+        let matches = search_opencode_sessions(&db_path, "needle", 10).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].session_id.as_deref(), Some("ses_1"));
+        assert_eq!(matches[0].label.as_deref(), Some("Match Session"));
+        assert_eq!(matches[0].matches, 2);
+        assert!(matches[0].text.contains("needle"));
+    }
+
+    #[test]
+    fn test_correlate_paths_to_hcom_uses_session_id_for_opencode() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = HcomDb::open_at(&dir.path().join("hcom.db")).unwrap();
+        db.conn()
+            .execute_batch(
+                "CREATE TABLE instances (
+                     name text,
+                     transcript_path text,
+                     session_id text
+                 );
+                 CREATE TABLE events (
+                     id integer PRIMARY KEY,
+                     type text,
+                     instance text,
+                     data text
+                 );",
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, transcript_path, session_id) VALUES (?, ?, ?)",
+                rusqlite::params!["luna", "/tmp/opencode.db", "ses_a"],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, transcript_path, session_id) VALUES (?, ?, ?)",
+                rusqlite::params!["nova", "/tmp/opencode.db", "ses_b"],
+            )
+            .unwrap();
+
+        let correlated = correlate_paths_to_hcom(
+            &db,
+            &[
+                ("/tmp/opencode.db".to_string(), Some("ses_a".to_string())),
+                ("/tmp/opencode.db".to_string(), Some("ses_b".to_string())),
+                ("/tmp/file.jsonl".to_string(), None),
+            ],
+        );
+
+        assert_eq!(
+            correlated.get(&transcript_search_key("/tmp/opencode.db", Some("ses_a"))),
+            Some(&"luna".to_string())
+        );
+        assert_eq!(
+            correlated.get(&transcript_search_key("/tmp/opencode.db", Some("ses_b"))),
+            Some(&"nova".to_string())
+        );
     }
 
     // ── Clap parse tests ─────────────────────────────────────────────
@@ -2129,7 +2823,15 @@ mod tests {
 
     #[test]
     fn test_transcript_view_with_flags() {
-        let args = TranscriptArgs::try_parse_from(["transcript", "@peso", "--json", "--full", "--last", "5"]).unwrap();
+        let args = TranscriptArgs::try_parse_from([
+            "transcript",
+            "@peso",
+            "--json",
+            "--full",
+            "--last",
+            "5",
+        ])
+        .unwrap();
         assert_eq!(args.name.as_deref(), Some("@peso"));
         assert!(args.json);
         assert!(args.full);
@@ -2145,7 +2847,15 @@ mod tests {
 
     #[test]
     fn test_transcript_search() {
-        let args = TranscriptArgs::try_parse_from(["transcript", "search", "error", "--live", "--limit", "50"]).unwrap();
+        let args = TranscriptArgs::try_parse_from([
+            "transcript",
+            "search",
+            "error",
+            "--live",
+            "--limit",
+            "50",
+        ])
+        .unwrap();
         match args.subcmd {
             Some(TranscriptSubcmd::Search(ref s)) => {
                 assert_eq!(s.pattern, "error");
@@ -2158,7 +2868,9 @@ mod tests {
 
     #[test]
     fn test_transcript_timeline() {
-        let args = TranscriptArgs::try_parse_from(["transcript", "timeline", "--json", "--last", "3"]).unwrap();
+        let args =
+            TranscriptArgs::try_parse_from(["transcript", "timeline", "--json", "--last", "3"])
+                .unwrap();
         match args.subcmd {
             Some(TranscriptSubcmd::Timeline(ref t)) => {
                 assert!(t.json);

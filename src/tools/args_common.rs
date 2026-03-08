@@ -1,16 +1,6 @@
 //! Shared argument parsing infrastructure for CLI tools.
-//!
-//! functions, and token manipulation utilities used by claude_args, gemini_args,
-//! and codex_args parsers.
-//!
-//! Each tool has specific flags and semantics, but shares:
-//! - Token parsing patterns (flags, values, positionals)
-//! - ArgsSpec field structure (source, clean_tokens, positional_tokens, etc.)
-//! - Helper functions for token manipulation
 
 use std::collections::HashSet;
-
-// ==================== Source Type ====================
 
 /// Where the args came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,8 +9,6 @@ pub enum SourceType {
     Env,
     None,
 }
-
-// ==================== Flag Value ====================
 
 /// A flag value that may be a single string or a list (for repeatable flags).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,8 +34,6 @@ impl FlagValue {
         }
     }
 }
-
-// ==================== Token Helpers ====================
 
 /// Extract flag name from token, handling --flag=value syntax.
 /// Returns lowercase flag name or None if not a flag.
@@ -86,12 +72,17 @@ pub fn looks_like_flag(
     if token_lower == "--" {
         return true;
     }
-    prefix_flags.iter().any(|p| token_lower.starts_with(p.as_str()))
+    prefix_flags
+        .iter()
+        .any(|p| token_lower.starts_with(p.as_str()))
 }
 
 /// Remove duplicate boolean flags, keeping first occurrence.
 /// Only deduplicates flags in the provided set.
-pub fn deduplicate_boolean_flags(tokens: &[String], boolean_flags: &HashSet<String>) -> Vec<String> {
+pub fn deduplicate_boolean_flags(
+    tokens: &[String],
+    boolean_flags: &HashSet<String>,
+) -> Vec<String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut result = Vec::new();
 
@@ -202,8 +193,6 @@ pub fn remove_positional(tokens: &[String], positional_indexes: &[usize]) -> Vec
     result
 }
 
-// ==================== Common ArgsSpec Methods ====================
-
 /// Check for user-provided flags in tokens (only scans before `--` separator).
 pub fn has_flag_in_tokens(clean_tokens: &[String], names: &[&str], prefixes: &[&str]) -> bool {
     let name_set: HashSet<String> = names.iter().map(|n| n.to_lowercase()).collect();
@@ -256,8 +245,6 @@ pub fn rebuild_tokens_from(
     }
     tokens
 }
-
-// ==================== Shell Utilities ====================
 
 /// Simple shell-safe quoting for env string serialization.
 pub fn shell_quote(s: &str) -> String {
@@ -331,9 +318,7 @@ pub fn shell_split(s: &str) -> Result<Vec<String>, String> {
     Ok(tokens)
 }
 
-// ==================== String Distance ====================
-
-/// Simple Levenshtein distance for flag suggestion.
+#[allow(clippy::needless_range_loop)]
 pub fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -374,8 +359,6 @@ pub fn find_close_match(input: &str, candidates: &[String]) -> Option<String> {
     best.map(|(_, s)| s.clone())
 }
 
-// ==================== Tests ====================
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,10 +373,7 @@ mod tests {
             extract_flag_name_from_token("--model=opus"),
             Some("--model".to_string())
         );
-        assert_eq!(
-            extract_flag_name_from_token("-p"),
-            Some("-p".to_string())
-        );
+        assert_eq!(extract_flag_name_from_token("-p"), Some("-p".to_string()));
         assert_eq!(extract_flag_name_from_token("value"), None);
     }
 
@@ -509,16 +489,16 @@ mod tests {
 
     #[test]
     fn test_find_close_match() {
-        let candidates: Vec<String> = vec![
-            "--verbose".into(),
-            "--model".into(),
-            "--version".into(),
-        ];
+        let candidates: Vec<String> =
+            vec!["--verbose".into(), "--model".into(), "--version".into()];
         assert_eq!(
             find_close_match("--verbos", &candidates),
             Some("--verbose".to_string())
         );
-        assert_eq!(find_close_match("--xyz-totally-different", &candidates), None);
+        assert_eq!(
+            find_close_match("--xyz-totally-different", &candidates),
+            None
+        );
     }
 
     #[test]

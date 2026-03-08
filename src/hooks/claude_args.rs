@@ -1,26 +1,9 @@
 //! Claude CLI argument parsing and validation.
-//!
-//!
-//! Parses Claude Code CLI arguments with full support for:
-//! - Flag aliases (--allowed-tools, --allowedtools, --allowedTools)
-//! - Boolean flags (--verbose, -p, etc.)
-//! - Value flags (--model opus, --model=opus)
-//! - Optional value flags (--resume, --resume=session-id)
-//! - Positional arguments (prompt text)
-//! - The -- separator for literal arguments
-//!
-//! The parser produces `ClaudeArgsSpec` which can be:
-//! - Queried for specific flags (has_flag, get_flag_value)
-//! - Modified immutably (update method)
-//! - Merged with other specs (merge_claude_args)
-//! - Serialized back to tokens (rebuild_tokens, to_env_string)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 pub use crate::tools::args_common::SourceType;
-
-// ==================== Flag Classification ====================
 
 /// Flag aliases: multiple spellings → canonical form.
 fn flag_aliases() -> HashMap<&'static str, &'static str> {
@@ -73,20 +56,11 @@ const BOOLEAN_FLAGS: &[&str] = &[
 ];
 
 /// Flags with optional values (--resume, --debug, etc.).
-const OPTIONAL_VALUE_FLAGS: &[&str] = &[
-    "--resume",
-    "-r",
-    "--debug",
-    "-d",
-    "--teleport",
-    "--from-pr",
-];
+const OPTIONAL_VALUE_FLAGS: &[&str] =
+    &["--resume", "-r", "--debug", "-d", "--teleport", "--from-pr"];
 
 /// Alias groups for optional value flags.
-const OPTIONAL_ALIAS_GROUPS: &[&[&str]] = &[
-    &["--resume", "-r"],
-    &["--debug", "-d"],
-];
+const OPTIONAL_ALIAS_GROUPS: &[&[&str]] = &[&["--resume", "-r"], &["--debug", "-d"]];
 
 /// Value flags (require following value).
 const VALUE_FLAGS: &[&str] = &[
@@ -122,8 +96,6 @@ const VALUE_FLAGS: &[&str] = &[
     "--teammate-mode",
     "--tools",
 ];
-
-// ==================== ClaudeArgsSpec ====================
 
 /// Normalized representation of Claude CLI arguments.
 #[derive(Debug, Clone)]
@@ -257,13 +229,8 @@ impl ClaudeArgsSpec {
     }
 }
 
-// ==================== Public API ====================
-
 /// Resolve Claude args from CLI (highest precedence) or env string.
-pub fn resolve_claude_args(
-    cli_args: Option<&[String]>,
-    env_value: Option<&str>,
-) -> ClaudeArgsSpec {
+pub fn resolve_claude_args(cli_args: Option<&[String]>, env_value: Option<&str>) -> ClaudeArgsSpec {
     if let Some(args) = cli_args {
         if !args.is_empty() {
             return parse_tokens(args, SourceType::Cli);
@@ -294,10 +261,7 @@ pub fn resolve_claude_args(
 /// 1. CLI positionals REPLACE all env positionals (empty string deletes them)
 /// 2. CLI flags override env flags (per-flag precedence)
 /// 3. Duplicate boolean flags are deduped
-pub fn merge_claude_args(
-    env_spec: &ClaudeArgsSpec,
-    cli_spec: &ClaudeArgsSpec,
-) -> ClaudeArgsSpec {
+pub fn merge_claude_args(env_spec: &ClaudeArgsSpec, cli_spec: &ClaudeArgsSpec) -> ClaudeArgsSpec {
     // Handle positionals: CLI replaces env (if present), else inherit env
     let final_positionals: Vec<String> = if !cli_spec.positional_tokens.is_empty() {
         if cli_spec.positional_tokens == [""] {
@@ -352,7 +316,10 @@ pub fn merge_claude_args(
     merged = deduplicate_boolean_flags(&merged);
 
     // Insert positionals before -- or at end
-    let insert_idx = merged.iter().position(|t| t == "--").unwrap_or(merged.len());
+    let insert_idx = merged
+        .iter()
+        .position(|t| t == "--")
+        .unwrap_or(merged.len());
     for (j, pos) in final_positionals.iter().enumerate() {
         merged.insert(insert_idx + j, pos.clone());
     }
@@ -371,7 +338,10 @@ pub fn add_background_defaults(spec: &ClaudeArgsSpec) -> ClaudeArgsSpec {
     let mut tokens = spec.clean_tokens.clone();
     let mut modified = false;
 
-    let insert_idx = tokens.iter().position(|t| t == "--").unwrap_or(tokens.len());
+    let insert_idx = tokens
+        .iter()
+        .position(|t| t == "--")
+        .unwrap_or(tokens.len());
 
     if !spec.has_flag(&["--output-format"], &["--output-format="]) {
         tokens.insert(insert_idx, "stream-json".to_string());
@@ -379,7 +349,10 @@ pub fn add_background_defaults(spec: &ClaudeArgsSpec) -> ClaudeArgsSpec {
         modified = true;
     }
 
-    let new_insert_idx = tokens.iter().position(|t| t == "--").unwrap_or(tokens.len());
+    let new_insert_idx = tokens
+        .iter()
+        .position(|t| t == "--")
+        .unwrap_or(tokens.len());
     if !spec.has_flag(&["--verbose"], &[]) {
         tokens.insert(new_insert_idx, "--verbose".to_string());
         modified = true;
@@ -401,7 +374,9 @@ pub fn validate_conflicts(spec: &ClaudeArgsSpec) -> Vec<String> {
         let lower = token.to_lowercase();
         if lower == "--system-prompt" || lower == "--append-system-prompt" {
             system_flags.push(lower);
-        } else if lower.starts_with("--system-prompt=") || lower.starts_with("--append-system-prompt=") {
+        } else if lower.starts_with("--system-prompt=")
+            || lower.starts_with("--append-system-prompt=")
+        {
             system_flags.push(lower.split('=').next().unwrap_or("").to_string());
         }
     }
@@ -421,8 +396,6 @@ pub fn validate_conflicts(spec: &ClaudeArgsSpec) -> Vec<String> {
     warnings
 }
 
-// ==================== Internal Parser ====================
-
 fn parse_tokens(tokens: &[impl AsRef<str>], source: SourceType) -> ClaudeArgsSpec {
     parse_tokens_with_errors(tokens, source, vec![])
 }
@@ -440,7 +413,10 @@ fn parse_tokens_with_errors(
     let opt_val_set: HashSet<&str> = OPTIONAL_VALUE_FLAGS.iter().copied().collect();
     let val_set: HashSet<&str> = VALUE_FLAGS.iter().copied().collect();
 
-    let opt_val_prefixes: Vec<String> = OPTIONAL_VALUE_FLAGS.iter().map(|f| format!("{}=", f)).collect();
+    let opt_val_prefixes: Vec<String> = OPTIONAL_VALUE_FLAGS
+        .iter()
+        .map(|f| format!("{}=", f))
+        .collect();
     let val_prefixes: Vec<String> = VALUE_FLAGS.iter().map(|f| format!("{}=", f)).collect();
 
     let raw_tokens: Vec<String> = tokens.iter().map(|t| t.as_ref().to_string()).collect();
@@ -466,9 +442,7 @@ fn parse_tokens_with_errors(
 
         if let Some(canonical) = pending_canonical {
             if looks_like_new_flag(&token_lower) {
-                let display = pending_canonical_token
-                    .as_deref()
-                    .unwrap_or(canonical);
+                let display = pending_canonical_token.as_deref().unwrap_or(canonical);
                 errors.push(format!("{} requires a value before '{}'", display, token));
                 pending_canonical = None;
                 pending_canonical_token = None;
@@ -492,7 +466,10 @@ fn parse_tokens_with_errors(
 
         if let Some(ref generic_flag) = pending_generic_flag.clone() {
             if looks_like_new_flag(&token_lower) {
-                errors.push(format!("{} requires a value before '{}'", generic_flag, token));
+                errors.push(format!(
+                    "{} requires a value before '{}'",
+                    generic_flag, token
+                ));
                 pending_generic_flag = None;
                 advance = false;
             } else {
@@ -547,7 +524,9 @@ fn parse_tokens_with_errors(
         }
 
         // Check canonical --flag=value form
-        if let Some((canonical, value)) = extract_canonical_prefixed(token, &token_lower, &canon_prefixes) {
+        if let Some((canonical, value)) =
+            extract_canonical_prefixed(token, &token_lower, &canon_prefixes)
+        {
             clean.push(token.clone());
             flag_values.insert(canonical.to_string(), value);
             i += 1;
@@ -606,7 +585,10 @@ fn parse_tokens_with_errors(
         if (token_lower.starts_with("--")
             || (token_lower.starts_with('-')
                 && token_lower.len() == 2
-                && token_lower.chars().nth(1).is_some_and(|c| c.is_alphabetic())))
+                && token_lower
+                    .chars()
+                    .nth(1)
+                    .is_some_and(|c| c.is_alphabetic())))
             && !looks_like_new_flag(&token_lower)
         {
             let base = token.split('=').next().unwrap_or(token);
@@ -641,9 +623,7 @@ fn parse_tokens_with_errors(
 
     // Handle unterminated pending flags
     if let Some(canonical) = pending_canonical {
-        let display = pending_canonical_token
-            .as_deref()
-            .unwrap_or(canonical);
+        let display = pending_canonical_token.as_deref().unwrap_or(canonical);
         errors.push(format!("{} requires a value at end of arguments", display));
     }
     if let Some(ref flag) = pending_generic_flag {
@@ -662,8 +642,6 @@ fn parse_tokens_with_errors(
         is_fork,
     }
 }
-
-// ==================== Helpers ====================
 
 /// Pre-computed flag lookup sets for `looks_like_new_flag`.
 /// Built once via OnceLock to avoid rebuilding on every call.
@@ -754,14 +732,20 @@ fn deduplicate_boolean_flags(tokens: &[String]) -> Vec<String> {
 }
 
 /// Toggle background flag, preserving positional arguments.
-fn toggle_background(tokens: &[String], positional_indexes: &[usize], desired: bool) -> Vec<String> {
+fn toggle_background(
+    tokens: &[String],
+    positional_indexes: &[usize],
+    desired: bool,
+) -> Vec<String> {
     let pos_set: HashSet<usize> = positional_indexes.iter().copied().collect();
     let bg_set: HashSet<&str> = BACKGROUND_SWITCHES.iter().copied().collect();
 
     let filtered: Vec<String> = tokens
         .iter()
         .enumerate()
-        .filter(|(idx, token)| pos_set.contains(idx) || !bg_set.contains(token.to_lowercase().as_str()))
+        .filter(|(idx, token)| {
+            pos_set.contains(idx) || !bg_set.contains(token.to_lowercase().as_str())
+        })
         .map(|(_, t)| t.clone())
         .collect();
 
@@ -833,8 +817,6 @@ use crate::tools::args_common::{
 /// Simple shell-safe quoting for env string serialization.
 use crate::tools::args_common::shell_quote;
 
-// ==================== Tests ====================
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,10 +868,7 @@ mod tests {
     fn test_parse_value_flag_equals() {
         let args: Vec<String> = vec!["--model=sonnet".into()];
         let spec = parse_tokens(&args, SourceType::Cli);
-        assert_eq!(
-            spec.get_flag_value("--model"),
-            Some("sonnet".to_string())
-        );
+        assert_eq!(spec.get_flag_value("--model"), Some("sonnet".to_string()));
     }
 
     #[test]
@@ -995,10 +974,7 @@ mod tests {
 
     #[test]
     fn test_merge_cli_overrides_env() {
-        let env_spec = parse_tokens(
-            &["--model", "sonnet", "--verbose"],
-            SourceType::Env,
-        );
+        let env_spec = parse_tokens(&["--model", "sonnet", "--verbose"], SourceType::Env);
         let cli_spec = parse_tokens(&["--model", "opus"], SourceType::Cli);
         let merged = merge_claude_args(&env_spec, &cli_spec);
         assert_eq!(merged.get_flag_value("--model"), Some("opus".to_string()));
@@ -1103,12 +1079,7 @@ mod tests {
     #[test]
     fn test_validate_multiple_system_prompt() {
         let spec = parse_tokens(
-            &[
-                "--system-prompt",
-                "a",
-                "--system-prompt",
-                "b",
-            ],
+            &["--system-prompt", "a", "--system-prompt", "b"],
             SourceType::Cli,
         );
         let warnings = validate_conflicts(&spec);
@@ -1148,19 +1119,13 @@ mod tests {
 
     #[test]
     fn test_get_flag_value_last_wins() {
-        let spec = parse_tokens(
-            &["--model", "sonnet", "--model", "opus"],
-            SourceType::Cli,
-        );
+        let spec = parse_tokens(&["--model", "sonnet", "--model", "opus"], SourceType::Cli);
         assert_eq!(spec.get_flag_value("--model"), Some("opus".to_string()));
     }
 
     #[test]
     fn test_has_flag_before_double_dash() {
-        let spec = parse_tokens(
-            &["--verbose", "--", "--model", "x"],
-            SourceType::Cli,
-        );
+        let spec = parse_tokens(&["--verbose", "--", "--model", "x"], SourceType::Cli);
         assert!(spec.has_flag(&["--verbose"], &[]));
         // --model is after --, should not be found as a flag
         assert!(!spec.has_flag(&["--model"], &[]));

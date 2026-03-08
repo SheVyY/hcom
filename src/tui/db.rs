@@ -13,7 +13,7 @@ use crate::tui::model::*;
 use crate::tui::status;
 
 use crate::paths;
-use crate::shared::{ST_ACTIVE};
+use crate::shared::ST_ACTIVE;
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -648,7 +648,8 @@ fn load_orphans(conn: &Connection) -> Vec<OrphanProcess> {
                             .map(|rows| rows.flatten().map(|p| p as u32).collect())
                     })
                     .unwrap_or_default();
-                return cached.iter()
+                return cached
+                    .iter()
                     .filter(|o| !active_db_pids.contains(&o.pid))
                     .cloned()
                     .collect();
@@ -688,11 +689,8 @@ fn load_orphans(conn: &Connection) -> Vec<OrphanProcess> {
         };
 
         // Check if PID is still alive
-        #[cfg(unix)]
-        {
-            if unsafe { libc::kill(pid as i32, 0) } != 0 {
-                continue; // Process is dead
-            }
+        if !crate::pidtrack::is_alive(pid) {
+            continue;
         }
 
         let tool_s = json_str(info, "tool", "claude");
@@ -1171,7 +1169,7 @@ struct PresetDef {
     platforms: &'static [&'static str],
 }
 
-/// All built-in presets, matching shared.py:TERMINAL_PRESETS.
+/// All built-in presets (canonical list in shared/constants.rs TERMINAL_PRESETS).
 /// Order here determines display order in the TUI.
 const BUILTIN_PRESETS: &[PresetDef] = &[
     // macOS native

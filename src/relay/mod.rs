@@ -160,7 +160,7 @@ pub fn is_relay_handled_by_daemon(db: &HcomDb) -> bool {
     };
 
     // TCP probe with 100ms timeout
-    use std::net::{TcpStream, SocketAddr};
+    use std::net::{SocketAddr, TcpStream};
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     match TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(100)) {
         Ok(_) => {
@@ -171,10 +171,15 @@ pub fn is_relay_handled_by_daemon(db: &HcomDb) -> bool {
             // Atomic increment via SQL — only clear after 3 consecutive failures
             if let Ok(()) = db.conn().execute_batch(
                 "INSERT INTO kv (key, value) VALUES ('relay_daemon_fail_count', '1') \
-                 ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)"
+                 ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
             ) {
-                let fail_count: i64 = db.conn()
-                    .query_row("SELECT value FROM kv WHERE key = 'relay_daemon_fail_count'", [], |r| r.get(0))
+                let fail_count: i64 = db
+                    .conn()
+                    .query_row(
+                        "SELECT value FROM kv WHERE key = 'relay_daemon_fail_count'",
+                        [],
+                        |r| r.get(0),
+                    )
                     .unwrap_or(1);
                 if fail_count >= 3 {
                     safe_kv_set(db, "relay_daemon_port", None);
@@ -231,7 +236,13 @@ pub fn trigger_push() {
         Err(_) => return,
     };
     let device_uuid = read_device_uuid();
-    let _ = push::push(&db, ephemeral.client_ref(), &config.relay_id, &device_uuid, false);
+    let _ = push::push(
+        &db,
+        ephemeral.client_ref(),
+        &config.relay_id,
+        &device_uuid,
+        false,
+    );
     ephemeral.disconnect();
 }
 

@@ -34,6 +34,7 @@ export const HcomPlugin: Plugin = async ({ client, $ }) => {
   let notifyServer: ReturnType<typeof Bun.listen> | null = null  // TCP notify server for instant message wake
   let lastReportedStatus: string | null = null  // Skip redundant status updates
   let pendingAckId: number | null = null        // Deferred ack: set by deliverPendingToIdle, acked by transform
+  let permissionPending = false                  // Exact permission gate from OpenCode events
 
   // SAFE-02: Lazy PATH detection on first hook callback
   function checkHcom(): boolean {
@@ -74,6 +75,10 @@ export const HcomPlugin: Plugin = async ({ client, $ }) => {
   // Deliver pending messages via promptAsync. Ack is deferred to transform
   // (fires on the loop iteration that actually processes the user message).
   async function deliverPendingToIdle(sid: string): Promise<boolean> {
+    if (permissionPending) {
+      log("DEBUG", "plugin.delivery_skipped", instanceName, { reason: "permission_pending" })
+      return false
+    }
     if (!instanceName) return false
     if (pendingAckId !== null) {
       log("DEBUG", "plugin.delivery_skipped", instanceName, { reason: "pending_ack_in_flight", pending_ack: pendingAckId })
@@ -119,6 +124,7 @@ export const HcomPlugin: Plugin = async ({ client, $ }) => {
   // daemon down, etc. other made up scenario etc.). Does NOT deliver messages — that's handled by
   // TCP notify (on message arrival) and session.status events (on idle).
   async function reconcile(): Promise<void> {
+    if (permissionPending) return
     if (!instanceName || !sessionId) return
     try {
       const statusResult = await client.session.status()
@@ -228,6 +234,34 @@ export const HcomPlugin: Plugin = async ({ client, $ }) => {
             }
             break
           }
+          case "permission.asked": {
+            permissionPending = true
+            const eventSessionId = event.properties.sessionID
+            if (eventSessionId && !instanceName && !bindingPromise) {
+              await bindIdentity(eventSessionId)
+            }
+            if (instanceName) {
+              lastReportedStatus = "blocked"
+              await $.nothrow()`hcom opencode-status --name ${instanceName} --status blocked --context ${"approval"} --detail ${event.properties.permission}`.quiet()
+              log("INFO", "plugin.permission_asked", instanceName, { permission: event.properties.permission, request_id: event.properties.id })
+            }
+            break
+          }
+          case "permission.replied": {
+            permissionPending = false
+            const eventSessionId = event.properties.sessionID
+            if (instanceName) {
+              const statusResult = await client.session.status()
+              const current = eventSessionId ? statusResult.data?.[eventSessionId] : null
+              const hcomStatus = !current || current.type === "idle" ? "listening" : "active"
+              lastReportedStatus = hcomStatus
+              await $.nothrow()`hcom opencode-status --name ${instanceName} --status ${hcomStatus}`.quiet()
+              if (hcomStatus === "listening" && eventSessionId) {
+                await deliverPendingToIdle(eventSessionId)
+              }
+            }
+            break
+          }
           case "session.status": {
             const statusType = event.properties.status.type
             const eventSessionId = event.properties.sessionID
@@ -240,6 +274,10 @@ export const HcomPlugin: Plugin = async ({ client, $ }) => {
             }
 
             // Report status to hcom daemon (skip if unchanged)
+            if (permissionPending) {
+              startReconcileTimer()
+              break
+            }
             if (instanceName) {
               const hcomStatus = statusType === "idle" ? "listening" : "active"
               if (hcomStatus !== lastReportedStatus) {
@@ -269,6 +307,7 @@ export const HcomPlugin: Plugin = async ({ client, $ }) => {
             bindingPromise = null
             lastReportedStatus = null
             pendingAckId = null
+            permissionPending = false
             break
           case "file.edited": {
             const filePath = event.properties.file

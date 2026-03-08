@@ -1,6 +1,4 @@
 //! Shared hook functions — deliver, poll, bind, bootstrap, finalize.
-//!
-//! shared functions. These are called by tool-specific dispatchers (Phase 1B/1C/1D).
 
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -19,77 +17,56 @@ use crate::shared::constants::{BIND_MARKER_RE, MAX_MESSAGES_PER_DELIVERY};
 use crate::shared::context::HcomContext;
 use crate::shared::{ST_ACTIVE, ST_INACTIVE, ST_LISTENING};
 
-/// Safe hcom commands auto-approved in tool permissions.
-pub(crate) const SAFE_HCOM_COMMANDS: &[&str] = &[
-    "send", "start", "help", "--help", "-h", "list", "events", "listen", "relay", "config",
-    "transcript", "archive", "bundle", "status", "term", "--version", "-v",
-    "--new-terminal",
-];
-
-/// Cached hcom invocation prefix (computed once per process lifetime).
-static HCOM_PREFIX: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
-    if std::env::var("HCOM_DEV_ROOT").is_ok() {
-        return vec!["hcom".into()];
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Ok(resolved) = exe.canonicalize() {
-            let has_uv = resolved.components().any(|c| c.as_os_str() == "uv");
-            if has_uv
-                && std::process::Command::new("uvx")
-                    .arg("--version")
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .is_ok()
-            {
-                return vec!["uvx".into(), "hcom".into()];
-            }
+/// Run a hook handler with panic safety.
+///
+/// Catches panics in the handler closure, logs them, and returns the fallback
+/// value instead of crashing the host process. Used by all tool dispatchers.
+pub(crate) fn dispatch_with_panic_guard<R>(
+    tool: &str,
+    hook_name: &str,
+    fallback: R,
+    f: impl FnOnce() -> R,
+) -> R {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(_) => {
+            log::log_error(
+                "hooks",
+                &format!("{tool}.dispatch.panic"),
+                &format!("hook={hook_name}"),
+            );
+            fallback
         }
     }
+}
 
-    vec!["hcom".into()]
-});
-
-/// Detect hcom invocation prefix based on execution context.
+/// Commands auto-approved in tool permission rules (Claude/Gemini/Codex settings).
 ///
-/// - dev mode (HCOM_DEV_ROOT): "hcom"
-/// - uvx install: "uvx hcom"
-/// - otherwise: "hcom"
-///
-/// Result is cached after first call (process spawn only happens once).
-pub(crate) fn get_hcom_prefix() -> Vec<String> {
-    HCOM_PREFIX.clone()
-}
-
-/// Get the base directory for tool config files (e.g. .codex/, .gemini/).
-///
-/// Reads HCOM_DIR env var directly (not cached Config) so tests can override.
-/// Returns HCOM_DIR parent if set, otherwise home directory.
-pub(crate) fn tool_config_root() -> std::path::PathBuf {
-    if let Ok(hcom_dir) = std::env::var("HCOM_DIR") {
-        std::path::PathBuf::from(hcom_dir)
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default())
-    } else {
-        dirs::home_dir().unwrap_or_default()
-    }
-}
-
-/// Build hcom command string for hook commands.
-pub(crate) fn build_hcom_command() -> String {
-    get_hcom_prefix().join(" ")
-}
-
-/// Set terminal title via escape codes written to /dev/tty.
-pub(crate) fn set_terminal_title(instance_name: &str) {
-    let title = format!("hcom: {}", instance_name);
-    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
-        use std::io::Write;
-        let _ = write!(tty, "\x1b]1;{}\x07\x1b]2;{}\x07", title, title);
-    }
-}
+/// Included: read-only queries, messaging, and session lifecycle commands that
+/// agents need to run without user approval prompts.
+/// Excluded: `stop`, `kill`, `run`, `reset` — these are destructive or
+/// admin-level and require explicit user approval.
+pub(crate) const SAFE_HCOM_COMMANDS: &[&str] = &[
+    "send",
+    "start",
+    "help",
+    "--help",
+    "-h",
+    "list",
+    "events",
+    "listen",
+    "relay",
+    "config",
+    "transcript",
+    "archive",
+    "bundle",
+    "status",
+    "term",
+    "hooks",
+    "--version",
+    "-v",
+    "--new-terminal",
+];
 
 /// Pre-gate check: should hooks proceed?
 ///
@@ -103,11 +80,18 @@ pub fn hook_gate_check(ctx: &HcomContext, db: &HcomDb) -> bool {
         return true;
     }
     // Check if any instances exist — distinguish "no rows" from DB error
-    match db.conn().query_row("SELECT 1 FROM instances LIMIT 1", [], |_| Ok(())) {
+    match db
+        .conn()
+        .query_row("SELECT 1 FROM instances LIMIT 1", [], |_| Ok(()))
+    {
         Ok(()) => true,
         Err(rusqlite::Error::QueryReturnedNoRows) => false,
         Err(e) => {
-            eprintln!("[hcom] warn: hook gate DB check failed: {e}, proceeding anyway");
+            log::log_warn(
+                "hooks",
+                "gate.db_error",
+                &format!("hook gate DB check failed: {e}, proceeding anyway"),
+            );
             true // On DB error, proceed rather than silently disabling hooks
         }
     }
@@ -139,8 +123,6 @@ pub(crate) fn message_to_value(m: &Message) -> Value {
     Value::Object(obj)
 }
 
-// ==================== Shared Helpers ====================
-
 /// Load config hints string (from instance-level or global config).
 /// Call once per hook invocation and pass to format functions.
 pub(crate) fn load_config_hints() -> String {
@@ -153,8 +135,6 @@ pub(crate) fn load_config_hints() -> String {
 pub(crate) fn make_instance_lookup(db: &HcomDb) -> impl Fn(&str) -> Option<Value> + '_ {
     |name: &str| db.get_instance(name).ok().flatten()
 }
-
-// ==================== Deliver Pending Messages (1A.3) ====================
 
 /// Fetch unread messages, update cursor, set delivery status.
 ///
@@ -202,8 +182,13 @@ fn deliver_raw_messages(
     let hints = load_config_hints();
     let get_config_hints = || hints.clone();
 
-    let formatted =
-        messages::format_messages_json(&deliver, instance_name, &get_instance_data, &get_config_hints, None);
+    let formatted = messages::format_messages_json(
+        &deliver,
+        instance_name,
+        &get_instance_data,
+        &get_config_hints,
+        None,
+    );
 
     // Update status to active with delivery context
     let sender = deliver
@@ -221,16 +206,14 @@ fn deliver_raw_messages(
         instance_name,
         ST_ACTIVE,
         &format!("deliver:{}", display),
-        "",
-        msg_ts,
-        None,
-        None,
+        instances::StatusUpdate {
+            msg_ts,
+            ..Default::default()
+        },
     );
 
     (deliver, Some(formatted))
 }
-
-// ==================== Poll Messages (1A.4) ====================
 
 /// Stop hook polling loop — NOT used by main PTY path.
 ///
@@ -296,7 +279,7 @@ fn poll_messages_inner(
     }
 
     // Set listening status
-    instances::set_status(db, instance_name, ST_LISTENING, "", "", "", None, None);
+    instances::set_status(db, instance_name, ST_LISTENING, "", Default::default());
 
     let start = Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
@@ -372,7 +355,8 @@ fn poll_loop(
         // - With relay: relay_wait() did long-poll, short TCP check (1s)
         // - Local-only with TCP: select wakes on notification (30s)
         // - Local-only no TCP: must poll frequently (100ms)
-        let relay_active = crate::relay::is_relay_enabled(&crate::config::load_config_snapshot().core);
+        let relay_active =
+            crate::relay::is_relay_enabled(&crate::config::load_config_snapshot().core);
         let wait_time = if relay_active {
             Duration::from_secs(remaining.as_secs().min(1))
         } else if notify_server.is_some() {
@@ -396,7 +380,11 @@ fn poll_loop(
             if ret > 0 {
                 // Drain all pending connections
                 if let Err(e) = server.set_nonblocking(true) {
-                    eprintln!("[hcom] warn: set_nonblocking failed: {e}, skipping drain");
+                    log::log_warn(
+                        "hooks",
+                        "poll.nonblocking_failed",
+                        &format!("set_nonblocking failed: {e}, skipping drain"),
+                    );
                 } else {
                     while let Ok((conn, _)) = server.accept() {
                         drop(conn);
@@ -449,10 +437,7 @@ fn setup_tcp_notification(instance_name: &str) -> (Option<TcpListener>, bool) {
             log::log_error(
                 "hooks",
                 "hook.error",
-                &format!(
-                    "hook=tcp_notification instance={} err={}",
-                    instance_name, e
-                ),
+                &format!("hook=tcp_notification instance={} err={}", instance_name, e),
             );
             (None, false)
         }
@@ -462,7 +447,14 @@ fn setup_tcp_notification(instance_name: &str) -> (Option<TcpListener>, bool) {
 /// Register hook notify port in DB.
 fn register_hook_notify_port(db: &HcomDb, instance_name: &str, port: u16) {
     if let Err(e) = db.upsert_notify_endpoint(instance_name, "hook", port) {
-        log::log_warn("native", "hooks.register_notify_fail", &format!("Failed to register hook notify port for {}: {}", instance_name, e));
+        log::log_warn(
+            "native",
+            "hooks.register_notify_fail",
+            &format!(
+                "Failed to register hook notify port for {}: {}",
+                instance_name, e
+            ),
+        );
     }
 }
 
@@ -474,15 +466,9 @@ fn delete_hook_notify_endpoint(db: &HcomDb, instance_name: &str) {
     );
 }
 
-// ==================== Find Last Bind Marker (1A.5) ====================
-
-/// Find last [hcom:xxx] or [HCOM:BIND:xxx] marker in transcript.
+/// Find last [hcom:xxx] marker in transcript.
 ///
 /// Reads file backwards in 64MB chunks with 70-byte overlap to find marker.
-/// For 1.3GB file: ~0.08s if marker near end, ~1.6s if absent.
-///
-/// Returns instance name from marker, or None if not found.
-///
 pub fn find_last_bind_marker(transcript_path: &str) -> Option<String> {
     let path = Path::new(transcript_path);
     let metadata = std::fs::metadata(path).ok()?;
@@ -494,7 +480,7 @@ pub fn find_last_bind_marker(transcript_path: &str) -> Option<String> {
 
     let chunk_size: usize = 64 * 1024 * 1024; // 64MB
     let overlap: usize = 70; // max prefix len (12) + max instance name (50) + margin
-    let marker_prefixes: &[&[u8]] = &[b"[hcom:", b"[HCOM:BIND:"];
+    let marker_prefixes: &[&[u8]] = &[b"[hcom:"];
 
     let mut file = std::fs::File::open(path).ok()?;
 
@@ -563,8 +549,6 @@ fn rfind_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     None
 }
 
-// ==================== Inject Bootstrap Once (1A.6) ====================
-
 /// Inject bootstrap text if not already announced.
 ///
 /// Idempotent — checks name_announced flag and only injects once
@@ -606,8 +590,6 @@ pub fn inject_bootstrap_once(
 
     Some(bootstrap_text)
 }
-
-// ==================== Init Hook Context (1A.7) ====================
 
 /// Initialize instance context from hook data via binding lookup.
 ///
@@ -746,10 +728,7 @@ fn try_bind_from_transcript(
         log::log_info(
             "hooks",
             "transcript.bind.skip",
-            &format!(
-                "instance={} not in pending={:?}",
-                instance_name, pending
-            ),
+            &format!("instance={} not in pending={:?}", instance_name, pending),
         );
         return None;
     }
@@ -769,10 +748,7 @@ fn try_bind_from_transcript(
     }
 
     let mut updates = serde_json::Map::new();
-    updates.insert(
-        "session_id".into(),
-        Value::String(session_id.to_string()),
-    );
+    updates.insert("session_id".into(), Value::String(session_id.to_string()));
     instances::update_instance_position(db, &instance_name, &updates);
 
     log::log_info(
@@ -791,6 +767,9 @@ fn try_bind_from_transcript(
 /// doing expensive transcript marker search.
 ///
 pub fn get_pending_instances(db: &HcomDb) -> Vec<String> {
+    // Purge leaked launch placeholders before treating them as bindable.
+    // Otherwise an old transcript marker can silently re-bind a stale row.
+    crate::instances::cleanup_stale_placeholders(db);
     let mut stmt = match db.conn().prepare(
         "SELECT name FROM instances WHERE session_id IS NULL AND tool != 'adhoc' ORDER BY created_at DESC",
     ) {
@@ -802,8 +781,6 @@ pub fn get_pending_instances(db: &HcomDb) -> Vec<String> {
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
 }
-
-// ==================== Notify Instance (1A.9) ====================
 
 /// Wake an instance's hook poll loop via TCP connection.
 ///
@@ -821,8 +798,6 @@ pub fn notify_hook_instance(instance_name: &str) {
 pub fn notify_hook_instance_with_db(db: &HcomDb, instance_name: &str) {
     instances::notify_instance_endpoints(db, instance_name, &["hook"]);
 }
-
-// ==================== Stop Instance ====================
 
 /// Stop instance: log snapshot, clean bindings, delete row.
 ///
@@ -905,25 +880,48 @@ fn stop_instance_inner(
                 let mut kitty_listen_on = String::new();
                 if let Some(ref lc_str) = instance_data.launch_context {
                     if let Ok(lc) = serde_json::from_str::<serde_json::Value>(lc_str) {
-                        terminal_preset = lc.get("terminal_preset").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        pane_id = lc.get("pane_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        proc_id = lc.get("process_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        terminal_id = lc.get("terminal_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        terminal_preset = lc
+                            .get("terminal_preset")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        pane_id = lc
+                            .get("pane_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        proc_id = lc
+                            .get("process_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        terminal_id = lc
+                            .get("terminal_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let lc_env = lc.get("env").and_then(|v| v.as_object());
-                        kitty_listen_on = lc.get("kitty_listen_on")
+                        kitty_listen_on = lc
+                            .get("kitty_listen_on")
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.is_empty())
-                            .or_else(|| lc_env.and_then(|e| e.get("KITTY_LISTEN_ON").and_then(|v| v.as_str())))
+                            .or_else(|| {
+                                lc_env
+                                    .and_then(|e| e.get("KITTY_LISTEN_ON").and_then(|v| v.as_str()))
+                            })
                             .unwrap_or("")
                             .to_string();
                     }
                 }
                 // Fallback: process_bindings table
                 if proc_id.is_empty() {
-                    if let Ok(mut stmt) = db.conn()
+                    if let Ok(mut stmt) = db
+                        .conn()
                         .prepare("SELECT process_id FROM process_bindings WHERE instance_name = ?")
                     {
-                        if let Ok(val) = stmt.query_row(params![instance_name], |row| row.get::<_, String>(0)) {
+                        if let Ok(val) =
+                            stmt.query_row(params![instance_name], |row| row.get::<_, String>(0))
+                        {
                             proc_id = val;
                         }
                     }
@@ -931,7 +929,8 @@ fn stop_instance_inner(
                 // Grab notify/inject ports before DB cleanup deletes them
                 let mut notify_port: u16 = 0;
                 let mut inject_port: u16 = 0;
-                if let Ok(mut stmt) = db.conn()
+                if let Ok(mut stmt) = db
+                    .conn()
                     .prepare("SELECT kind, port FROM notify_endpoints WHERE instance = ?")
                 {
                     if let Ok(rows) = stmt.query_map(params![instance_name], |row| {
@@ -947,18 +946,30 @@ fn stop_instance_inner(
                     }
                 }
 
-                crate::pidtrack::record_pid(
-                    &hcom_dir, pid_val as u32,
-                    &instance_data.tool, instance_name,
-                    &instance_data.directory, &proc_id,
-                    &terminal_preset, &pane_id, &terminal_id,
-                    &kitty_listen_on,
-                    instance_data.session_id.as_deref().unwrap_or(""),
-                    notify_port, inject_port,
-                    instance_data.tag.as_deref().unwrap_or(""),
+                crate::pidtrack::record_pid(&crate::pidtrack::PidRecord {
+                    hcom_dir: &hcom_dir,
+                    pid: pid_val as u32,
+                    tool: &instance_data.tool,
+                    name: instance_name,
+                    directory: &instance_data.directory,
+                    process_id: &proc_id,
+                    terminal_preset: &terminal_preset,
+                    pane_id: &pane_id,
+                    terminal_id: &terminal_id,
+                    kitty_listen_on: &kitty_listen_on,
+                    session_id: instance_data.session_id.as_deref().unwrap_or(""),
+                    notify_port,
+                    inject_port,
+                    tag: instance_data.tag.as_deref().unwrap_or(""),
+                });
+                log::log_info(
+                    "stop",
+                    "pidtrack_recorded",
+                    &format!(
+                        "pid={} instance={} preset={} pane_id={}",
+                        pid_val, instance_name, terminal_preset, pane_id
+                    ),
                 );
-                log::log_info("stop", "pidtrack_recorded",
-                    &format!("pid={} instance={} preset={} pane_id={}", pid_val, instance_name, terminal_preset, pane_id));
             }
         }
     }
@@ -1032,13 +1043,27 @@ fn stop_instance_inner(
     let _ = db.cleanup_subscriptions(instance_name);
 
     // Log life event with snapshot BEFORE delete
-    if let Err(e) = db.log_life_event(instance_name, "stopped", initiated_by, reason, Some(snapshot)) {
-        eprintln!("[hcom] warn: log_life_event failed for {instance_name}: {e}");
+    if let Err(e) = db.log_life_event(
+        instance_name,
+        "stopped",
+        initiated_by,
+        reason,
+        Some(snapshot),
+    ) {
+        log::log_warn(
+            "hooks",
+            "finalize.life_event_failed",
+            &format!("log_life_event failed for {instance_name}: {e}"),
+        );
     }
 
     // Delete instance row (CASCADE cleans remaining FK references)
     if let Err(e) = db.delete_instance(instance_name) {
-        eprintln!("[hcom] warn: delete_instance failed for {instance_name}: {e}");
+        log::log_warn(
+            "hooks",
+            "finalize.delete_failed",
+            &format!("delete_instance failed for {instance_name}: {e}"),
+        );
     }
 
     // Notify remaining listeners AFTER delete (so they see the row is gone)
@@ -1052,14 +1077,16 @@ fn stop_instance_inner(
     }
 
     // Trigger relay push (best-effort)
-    let _ = std::process::Command::new("hcom")
-        .args(["relay", "push"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let prefix = crate::runtime_env::get_hcom_prefix();
+    if let Some((cmd, prefix_args)) = prefix.split_first() {
+        let _ = std::process::Command::new(cmd)
+            .args(prefix_args)
+            .args(["relay", "push"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
 }
-
-// ==================== Finalize Session (1A.11) ====================
 
 /// Set inactive status, persist updates, and stop instance.
 ///
@@ -1084,10 +1111,7 @@ pub fn finalize_session(
         instance_name,
         ST_INACTIVE,
         &format!("exit:{}", reason),
-        "",
-        "",
-        None,
-        None,
+        Default::default(),
     );
 
     // Persist metadata updates
@@ -1099,24 +1123,28 @@ pub fn finalize_session(
     stop_instance(db, instance_name, "session", &format!("exit:{}", reason));
 }
 
-// ==================== Update Tool Status ====================
-
 /// Update instance status for tool execution.
 ///
 /// Calls extract_tool_detail for tool-specific detail formatting,
 /// then sets status to active with tool context.
 ///
-pub fn update_tool_status(db: &HcomDb, instance_name: &str, tool: &str, tool_name: &str, tool_input: &Value) {
+pub fn update_tool_status(
+    db: &HcomDb,
+    instance_name: &str,
+    tool: &str,
+    tool_name: &str,
+    tool_input: &Value,
+) {
     let detail = super::family::extract_tool_detail(tool, tool_name, tool_input);
     instances::set_status(
         db,
         instance_name,
         ST_ACTIVE,
         &format!("tool:{}", tool_name),
-        &detail,
-        "",
-        None,
-        None,
+        instances::StatusUpdate {
+            detail: &detail,
+            ..Default::default()
+        },
     );
 }
 
@@ -1136,17 +1164,6 @@ mod tests {
 
         let result = find_last_bind_marker(path.to_str().unwrap());
         assert_eq!(result, Some("luna".to_string()));
-    }
-
-    #[test]
-    fn test_find_last_bind_marker_legacy_format() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("transcript.jsonl");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "[HCOM:BIND:nova] test").unwrap();
-
-        let result = find_last_bind_marker(path.to_str().unwrap());
-        assert_eq!(result, Some("nova".to_string()));
     }
 
     #[test]
@@ -1282,27 +1299,47 @@ mod tests {
         stop_instance(&db, "parent", "test", "test_cleanup");
 
         // Instance should be deleted
-        let count: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM instances WHERE name = 'parent'", [], |r| r.get(0)
-        ).unwrap();
+        let count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM instances WHERE name = 'parent'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0, "instance should be deleted");
 
         // Notify endpoints should be deleted
-        let count: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM notify_endpoints WHERE instance = 'parent'", [], |r| r.get(0)
-        ).unwrap();
+        let count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM notify_endpoints WHERE instance = 'parent'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0, "notify endpoints should be deleted");
 
         // Process bindings should be deleted
-        let count: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM process_bindings WHERE instance_name = 'parent'", [], |r| r.get(0)
-        ).unwrap();
+        let count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM process_bindings WHERE instance_name = 'parent'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0, "process bindings should be deleted");
 
         // Life event should be logged
-        let count: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM events WHERE type = 'life' AND instance = 'parent'", [], |r| r.get(0)
-        ).unwrap();
+        let count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE type = 'life' AND instance = 'parent'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1, "life event should be logged");
     }
 
@@ -1334,15 +1371,22 @@ mod tests {
         stop_instance(&db, "parent", "test", "test_recursive");
 
         // All three instances should be deleted
-        let count: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM instances", [], |r| r.get(0)
-        ).unwrap();
-        assert_eq!(count, 0, "all instances (parent + subagents) should be deleted");
+        let count: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM instances", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "all instances (parent + subagents) should be deleted"
+        );
 
         // Life events should be logged for all three
-        let count: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM events WHERE type = 'life'", [], |r| r.get(0)
-        ).unwrap();
+        let count: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM events WHERE type = 'life'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(count, 3, "life events for parent + 2 subagents");
     }
 
@@ -1371,9 +1415,10 @@ mod tests {
         stop_instance(&db, "parent", "test", "test_depth2");
 
         // All three levels should be cleaned up
-        let count: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM instances", [], |r| r.get(0)
-        ).unwrap();
+        let count: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM instances", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 0, "all 3 levels should be deleted");
 
         // Verify life events logged for each level
@@ -1401,7 +1446,11 @@ mod tests {
         for i in 0..12u32 {
             let name = format!("inst{}", i);
             let session_id = format!("sess-{}", i);
-            let parent_sid = if i == 0 { String::new() } else { format!("sess-{}", i - 1) };
+            let parent_sid = if i == 0 {
+                String::new()
+            } else {
+                format!("sess-{}", i - 1)
+            };
 
             if i == 0 {
                 let _ = db.conn().execute(
@@ -1423,15 +1472,19 @@ mod tests {
         stop_instance(&db, "inst0", "test", "test_depth_limit");
 
         // inst10 and inst11 should survive (depth 10 and 11, beyond limit)
-        let remaining: Vec<String> = db.conn()
+        let remaining: Vec<String> = db
+            .conn()
             .prepare("SELECT name FROM instances ORDER BY name")
             .unwrap()
             .query_map([], |row| row.get::<_, String>(0))
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
-        assert_eq!(remaining, vec!["inst10", "inst11"],
-            "instances beyond depth limit should survive");
+        assert_eq!(
+            remaining,
+            vec!["inst10", "inst11"],
+            "instances beyond depth limit should survive"
+        );
     }
 
     #[test]
@@ -1451,9 +1504,14 @@ mod tests {
         stop_instance(&db, "inst", "test", "second");
 
         // Only one life event
-        let count: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM events WHERE type = 'life' AND instance = 'inst'", [], |r| r.get(0)
-        ).unwrap();
+        let count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE type = 'life' AND instance = 'inst'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1, "only one life event for idempotent stop");
     }
 
@@ -1481,9 +1539,14 @@ mod tests {
         finalize_session(&db, "inst", "user_quit", None);
 
         // Instance should be deleted
-        let count: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM instances WHERE name = 'inst'", [], |r| r.get(0)
-        ).unwrap();
+        let count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM instances WHERE name = 'inst'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0, "finalize_session should delete instance");
 
         // "stopped" life event logged
@@ -1492,5 +1555,50 @@ mod tests {
             [], |r| r.get(0)
         ).unwrap();
         assert_eq!(count, 1, "stopped life event should be logged");
+    }
+
+    #[test]
+    fn test_stale_placeholder_marker_does_not_rebind() {
+        crate::config::Config::init();
+        let (dir, db) = make_test_db();
+
+        // Simulate a leaked launch placeholder older than the stale threshold.
+        let old_time = crate::shared::time::now_epoch_f64()
+            - (crate::instances::CLEANUP_PLACEHOLDER_THRESHOLD as f64 + 80.0);
+        let _ = db.conn().execute(
+            "INSERT INTO instances (name, tool, status, status_context, created_at)
+             VALUES ('luna', 'claude', 'pending', 'new', ?1)",
+            rusqlite::params![old_time],
+        );
+
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(&transcript, "assistant output [hcom:luna]\n").unwrap();
+
+        let ctx = crate::shared::context::HcomContext::from_env(
+            &std::collections::HashMap::new(),
+            dir.path().to_path_buf(),
+        );
+        let (instance_name, _updates, _matched_resume) = init_hook_context(
+            &db,
+            &ctx,
+            "sess-fresh",
+            transcript.to_str().unwrap(),
+        );
+
+        assert!(
+            instance_name.is_none(),
+            "stale placeholder should be cleaned before transcript binding"
+        );
+
+        assert!(
+            db.get_instance_full("luna").unwrap().is_none(),
+            "stale placeholder row should be deleted"
+        );
+
+        assert_eq!(
+            db.get_session_binding("sess-fresh").unwrap(),
+            None,
+            "fresh session must not get bound via stale marker"
+        );
     }
 }

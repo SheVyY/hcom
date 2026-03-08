@@ -13,17 +13,19 @@ pub type BrokerTestResult = (String, u16, Option<u64>);
 /// Test a single broker via TCP+TLS handshake. Returns round-trip ms or None.
 pub fn ping_broker(host: &str, port: u16, use_tls: bool) -> Option<u64> {
     let t0 = Instant::now();
-    let socket_addr = format!("{}:{}", host, port).to_socket_addrs().ok()?.next()?;
-    let mut stream = TcpStream::connect_timeout(
-        &socket_addr,
-        Duration::from_secs(5),
-    ).ok()?;
+    let socket_addr = format!("{}:{}", host, port)
+        .to_socket_addrs()
+        .ok()?
+        .next()?;
+    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(5)).ok()?;
 
     if use_tls {
         // TCP+TLS handshake only. Verify the broker is reachable and accepts TLS.
         // Set timeouts so handshake doesn't block forever on unreachable brokers.
         stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
-        stream.set_write_timeout(Some(Duration::from_secs(5))).ok()?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .ok()?;
 
         let mut root_store = rustls::RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());

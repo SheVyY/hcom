@@ -3,6 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/hcom)](https://pypi.org/project/hcom/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Built_with-Rust-dea584)](https://www.rust-lang.org/)
+[![GitHub stars](https://img.shields.io/github/stars/aannoo/hcom)](https://github.com/aannoo/hcom/stargazers)
 
 Agents running in separate terminals are isolated from each other. Context doesn't transfer, decisions get repeated, file edits collide.
 
@@ -189,7 +190,7 @@ hcom status                        # diagnostics
 <summary>CLI</summary>
 
 ```
-hcom (hook-comms) v0.7.0 - multi-agent communication
+hcom (hook-comms) v0.7.3 - multi-agent communication
 
 Usage:
 hcom                                  TUI dashboard
@@ -285,13 +286,18 @@ Usage:
     --json                         JSON array of all agents
     --names                        Just names, one per line
     --format TPL                   Template per agent: --format '{name} {status}'
+    Fields: name, base_name, status, status_context, status_detail,
+    status_age_seconds, description, unread_count, tool, tag, directory,
+    session_id, parent_name, agent_id, headless, created_at,
+    hooks_bound, process_bound, transcript_path, background_log_file,
+    launch_context
 
   hcom list [self|<name>]         Single agent details
     [field]                        Print specific field (status, directory, session_id, ...)
     --json                         Output as JSON
     --sh                           Shell exports: eval "$(hcom list self --sh)"
 
-  hcom list --stopped [name]      Stopped instances (from events)
+  hcom list --stopped [name]      Stopped agents (from events)
     --all                          All stopped (default: last 20)
 
 
@@ -456,7 +462,7 @@ Keys:
   hcom config <key> --info for details
 
   Precedence: defaults < config.toml < env vars
-  Files: /Users/anno/.hcom/config.toml, /Users/anno/.hcom/.env
+  Files: ~/.hcom/config.toml, ~/.hcom/config.env
   HCOM_DIR: isolate per project (see 'hcom reset --help')
 
 ## hooks
@@ -582,7 +588,7 @@ JSON format:
 ## kill
 
 Usage:
-  hcom kill <name> [name2 ...]    Kill process (+ close terminal pane)
+  hcom kill <name>                Kill process (+ close terminal pane)
   hcom kill tag:<name>            Kill all with tag
   hcom kill all                   Kill all with tracked PIDs
 
@@ -917,6 +923,7 @@ Managed (open + close on kill):
   kitty          auto split/tab/window
   wezterm        auto tab/split/window
   tmux           detached sessions
+  cmux           workspaces
 
   Variants:
     kitty: kitty-window, kitty-tab, kitty-split
@@ -929,6 +936,8 @@ Other (opens window only):
   Ghostty
   alacritty
   ttab
+  zellij
+  waveterm
 
 Custom command (open only):
   hcom config terminal "my-terminal -e bash {script}"
@@ -936,11 +945,16 @@ Custom command (open only):
 Custom preset with close (~/.hcom/config.toml):
   [terminal.presets.myterm]
   open = "myterm spawn -- bash {script}"
-  close = "myterm kill --id {id}"
+  close = "myterm kill --id {pane_id}"
   binary = "myterm"
+  pane_id_env = "MYTERM_PANE_ID"
 
-  {id} = stdout from the open command.
-  {pid} and {process_id} also available.
+Placeholders:
+  {script}     = hcom-generated launch wrapper script path
+  {pane_id}    = pane/window/workspace ID from pane_id_env; falls back to {id}
+  {process_id} = HCOM_PROCESS_ID for the launched agent
+  {pid}        = launched terminal process ID
+  {id}         = first line of stdout captured from the open command
 
 Set:    hcom config terminal kitty
 Reset:  hcom config terminal default

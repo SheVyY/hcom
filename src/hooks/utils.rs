@@ -5,8 +5,6 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-// ==================== Exit Codes ====================
-
 /// Hook allowed the operation — exit 0.
 pub const EXIT_ALLOW: i32 = 0;
 
@@ -15,8 +13,6 @@ pub const EXIT_ERROR: i32 = 1;
 
 /// Hook blocked the operation — exit 2 (message delivery).
 pub const EXIT_BLOCK: i32 = 2;
-
-// ==================== Hook Categories ====================
 
 /// Hook input delivery mechanism.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,8 +24,6 @@ pub enum HookCategory {
     /// Hook can block for extended periods (polling loops).
     Blocking,
 }
-
-// ==================== Hook Info ====================
 
 /// Static info about a hook type.
 #[derive(Debug, Clone)]
@@ -45,8 +39,6 @@ pub struct HookInfo {
     /// Input categories for this hook.
     pub categories: &'static [HookCategory],
 }
-
-// ==================== Hook Registry ====================
 
 /// All Claude hook types with their configuration.
 ///
@@ -86,6 +78,13 @@ pub static HOOK_REGISTRY: LazyLock<Vec<HookInfo>> = LazyLock::new(|| {
             matcher: "",
             timeout: Some(86400),
             categories: &[HookCategory::Stdin, HookCategory::Blocking],
+        },
+        HookInfo {
+            event_name: "PermissionRequest",
+            command_suffix: "permission-request",
+            matcher: "",
+            timeout: None,
+            categories: &[HookCategory::Stdin],
         },
         HookInfo {
             event_name: "SubagentStart",
@@ -143,9 +142,7 @@ pub fn get_hook_info(event_name: &str) -> Option<&'static HookInfo> {
 
 /// Look up hook info by command suffix.
 pub fn get_hook_by_suffix(suffix: &str) -> Option<&'static HookInfo> {
-    HOOK_REGISTRY
-        .iter()
-        .find(|h| h.command_suffix == suffix)
+    HOOK_REGISTRY.iter().find(|h| h.command_suffix == suffix)
 }
 
 #[cfg(test)]
@@ -154,7 +151,7 @@ mod tests {
 
     #[test]
     fn test_hook_registry_count() {
-        assert_eq!(HOOK_REGISTRY.len(), 9);
+        assert_eq!(HOOK_REGISTRY.len(), 10);
     }
 
     #[test]
@@ -177,6 +174,9 @@ mod tests {
         let info = get_hook_info("Stop").unwrap();
         assert_eq!(info.command_suffix, "poll");
         assert_eq!(info.timeout, Some(86400));
+
+        let info = get_hook_info("PermissionRequest").unwrap();
+        assert_eq!(info.command_suffix, "permission-request");
 
         let info = get_hook_info("PreToolUse").unwrap();
         assert_eq!(info.matcher, "Bash|Task|Write|Edit");

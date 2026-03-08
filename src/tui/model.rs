@@ -207,22 +207,12 @@ fn strip_context_prefix(ctx: &str) -> &str {
 
 /// Format a duration in seconds as a short human-readable string (e.g. "now", "5s", "3m", "2h", "1d").
 pub fn format_duration_short(secs: u64) -> String {
-    if secs == 0 {
-        "now".into()
-    } else if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h", secs / 3600)
-    } else {
-        format!("{}d", secs / 86400)
-    }
+    crate::shared::time::format_age(secs as i64)
 }
 
 /// Current Unix epoch as f64.
 pub fn epoch_now() -> f64 {
-    crate::shared::constants::now_epoch_f64()
+    crate::shared::time::now_epoch_f64()
 }
 
 /// Format timestamp as "HH:MM" in local timezone.
@@ -1125,7 +1115,11 @@ mod tests {
         ] {
             let mut a = test_agent("nova");
             a.status_context = input.into();
-            assert_eq!(a.context_display(), expected, "prefix not stripped from {input}");
+            assert_eq!(
+                a.context_display(),
+                expected,
+                "prefix not stripped from {input}"
+            );
         }
     }
 
@@ -1173,9 +1167,18 @@ mod tests {
 
     fn test_palette() -> CommandPalette {
         CommandPalette::new(vec![
-            CommandSuggestion { command: "list".into(), description: "Show agents" },
-            CommandSuggestion { command: "kill".into(), description: "Stop agent" },
-            CommandSuggestion { command: "send".into(), description: "Send message" },
+            CommandSuggestion {
+                command: "list".into(),
+                description: "Show agents",
+            },
+            CommandSuggestion {
+                command: "kill".into(),
+                description: "Stop agent",
+            },
+            CommandSuggestion {
+                command: "send".into(),
+                description: "Send message",
+            },
         ])
     }
 
@@ -1362,5 +1365,4 @@ mod tests {
         assert_eq!(ls.options_cursor, Some(LaunchField::Tag));
         assert_eq!(ls.editing, Some(LaunchField::Tag));
     }
-
 }

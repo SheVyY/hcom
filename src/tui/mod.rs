@@ -15,7 +15,7 @@ pub mod theme;
 
 use std::io::{Write, stdout};
 
-use color_eyre::Result;
+use anyhow::Result;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
 };
@@ -98,7 +98,7 @@ fn run_app(app: &mut App, viewport_height: u16, in_alt_screen: &mut bool) -> Res
                 ) {
                     Ok(t) => t,
                     Err(e) => {
-                        return Err(color_eyre::eyre::eyre!(
+                        return Err(anyhow::anyhow!(
                             "failed to initialize inline viewport: {}\n\
                              Try running in a terminal with full ANSI support.",
                             e
@@ -343,7 +343,7 @@ fn restore_terminal() {
 
 /// Entry point for the Rust TUI. Called from main.rs (default when no args).
 pub fn run() -> Result<()> {
-    color_eyre::install()?;
+    // Panic hook is installed below (restore_terminal + original_hook).
 
     // Install panic hook that restores terminal state before printing panic info.
     // Without this, a panic leaves the terminal in raw mode and unusable.

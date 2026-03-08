@@ -1,17 +1,7 @@
 //! Codex CLI hook handler and settings management.
 //!
-//! Codex has a single hook type: `codex-notify`, receiving JSON via argv[2].
-//!
-//! Unlike Claude/Gemini, Codex message delivery is NOT done in hooks —
-//! PTY injection is triggered by TranscriptWatcher detecting idle.
-//!
-//! Identity Resolution:
-//!   - HCOM-launched: HCOM_PROCESS_ID env var → process binding → instance
-//!   - Vanilla: Search transcript for [hcom:name] marker
-//!
-//! Settings:
-//!   - ~/.codex/config.toml: `notify = ["hcom", "codex-notify"]`
-//!   - ~/.codex/rules/hcom.rules: Execpolicy rules for auto-approval
+//! Single hook type `codex-notify` (JSON via argv[2]). Unlike Claude/Gemini,
+//! message delivery uses PTY injection triggered by TranscriptWatcher, not hooks.
 
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -24,10 +14,8 @@ use crate::hooks::family;
 use crate::instances;
 use crate::log;
 use crate::paths;
-use crate::shared::context::HcomContext;
 use crate::shared::ST_LISTENING;
-
-// ==================== Transcript Path Discovery ====================
+use crate::shared::context::HcomContext;
 
 /// Derive Codex transcript path from thread_id.
 ///
@@ -76,27 +64,10 @@ pub fn derive_codex_transcript_path(thread_id: &str) -> Option<String> {
     }
 }
 
-// ==================== Instance Resolution ====================
-
 /// Resolve Codex instance via process binding or session binding.
 ///
-/// Can derive transcript_path from thread_id if not provided.
-///
-fn resolve_instance_codex(
-    db: &HcomDb,
-    ctx: &HcomContext,
-    thread_id: &str,
-    transcript_path: Option<&str>,
-) -> Option<InstanceRow> {
-    let derived_path = if transcript_path.is_none() || transcript_path == Some("") {
-        derive_codex_transcript_path(thread_id)
-    } else {
-        None
-    };
-    let effective_path = transcript_path
-        .filter(|s| !s.is_empty())
-        .or(derived_path.as_deref());
-
+/// Resolve Codex instance from process or session binding.
+fn resolve_instance_codex(db: &HcomDb, ctx: &HcomContext, thread_id: &str) -> Option<InstanceRow> {
     instances::resolve_instance_from_binding(
         db,
         Some(thread_id).filter(|s| !s.is_empty()),
@@ -138,8 +109,6 @@ fn bind_vanilla_instance_codex(
     )
 }
 
-// ==================== Core Handler ====================
-
 /// Handle Codex notify hook — signals turn completion.
 ///
 /// Called by Codex with JSON payload containing:
@@ -156,18 +125,12 @@ fn bind_vanilla_instance_codex(
 ///
 fn handle_notify(db: &HcomDb, ctx: &HcomContext, raw: &Value) -> i32 {
     // Only process agent-turn-complete events
-    let event_type = raw
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let event_type = raw.get("type").and_then(|v| v.as_str()).unwrap_or("");
     if event_type != "agent-turn-complete" {
         return 0;
     }
 
-    let thread_id = raw
-        .get("thread-id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let thread_id = raw.get("thread-id").and_then(|v| v.as_str()).unwrap_or("");
 
     // Accept both "transcript_path" and "session_path" (fallback)
     let transcript_path_raw = raw
@@ -177,7 +140,7 @@ fn handle_notify(db: &HcomDb, ctx: &HcomContext, raw: &Value) -> i32 {
         .unwrap_or("");
 
     // Resolve instance
-    let mut instance = resolve_instance_codex(db, ctx, thread_id, Some(transcript_path_raw));
+    let mut instance = resolve_instance_codex(db, ctx, thread_id);
     let mut instance_name: String;
 
     if let Some(ref inst) = instance {
@@ -236,10 +199,7 @@ fn handle_notify(db: &HcomDb, ctx: &HcomContext, raw: &Value) -> i32 {
             updates.insert("directory".into(), Value::String(cwd));
         }
         if !thread_id.is_empty() {
-            updates.insert(
-                "session_id".into(),
-                Value::String(thread_id.to_string()),
-            );
+            updates.insert("session_id".into(), Value::String(thread_id.to_string()));
         }
         if let Some(ref tp) = transcript_path {
             updates.insert("transcript_path".into(), Value::String(tp.clone()));
@@ -249,13 +209,18 @@ fn handle_notify(db: &HcomDb, ctx: &HcomContext, raw: &Value) -> i32 {
 
     // Update instance status to listening with idle_since timestamp
     // Re-fetch instance to verify it still exists
-    if db.get_instance_full(&instance_name).ok().flatten().is_none() {
+    if db
+        .get_instance_full(&instance_name)
+        .ok()
+        .flatten()
+        .is_none()
+    {
         return 0;
     }
 
-    let idle_since = crate::shared::constants::now_iso();
+    let idle_since = crate::shared::time::now_iso();
 
-    instances::set_status(db, &instance_name, ST_LISTENING, "", "", "", None, None);
+    instances::set_status(db, &instance_name, ST_LISTENING, "", Default::default());
 
     let mut idle_updates = serde_json::Map::new();
     idle_updates.insert("idle_since".into(), Value::String(idle_since));
@@ -270,14 +235,12 @@ fn handle_notify(db: &HcomDb, ctx: &HcomContext, raw: &Value) -> i32 {
     0
 }
 
-// ==================== Entry Point ====================
-
 /// Handle codex-notify hook — entry point from router.
 ///
 /// Parses argv[2] JSON, builds context, dispatches to handle_notify.
 /// Returns exit code (0 = success).
 ///
-pub fn handle_codex_notify(args: &[String]) -> i32 {
+pub fn dispatch_codex_hook(args: &[String]) -> i32 {
     let start = std::time::Instant::now();
 
     // Parse payload from argv (args = ["codex-notify", "{json}"])
@@ -318,22 +281,9 @@ pub fn handle_codex_notify(args: &[String]) -> i32 {
         return 0;
     }
 
-    // Dispatch with panic safety (matches Gemini's catch_unwind pattern)
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let exit_code = common::dispatch_with_panic_guard("codex", "codex-notify", 0, || {
         handle_notify(&db, &ctx, &raw)
-    }));
-
-    let exit_code = match result {
-        Ok(code) => code,
-        Err(_) => {
-            log::log_error(
-                "hooks",
-                "codex.dispatch.panic",
-                "hook=codex-notify",
-            );
-            return 0;
-        }
-    };
+    });
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
     log::log_info(
@@ -348,8 +298,6 @@ pub fn handle_codex_notify(args: &[String]) -> i32 {
     exit_code
 }
 
-// ==================== Settings Management ====================
-
 /// Safe hcom commands that Codex should auto-approve.
 use super::common::SAFE_HCOM_COMMANDS;
 
@@ -361,7 +309,7 @@ const HCOM_TOOL_NAMES: &[&str] = &["claude", "gemini", "codex", "opencode"];
 /// Base directory for Codex config: HCOM_DIR parent if set (sandbox), otherwise $HOME.
 /// Reads HCOM_DIR directly (not cached Config) so tests can override via env var.
 fn codex_base_dir() -> PathBuf {
-    crate::hooks::common::tool_config_root()
+    crate::runtime_env::tool_config_root()
 }
 
 /// Get path to Codex config.toml.
@@ -391,13 +339,11 @@ fn is_hcom_notify_line(line: &str) -> bool {
     lower.contains("codex-notify")
 }
 
-use super::common::get_hcom_prefix;
-
 /// Build the expected notify line for config.toml.
 ///
 /// Dynamically detects invocation mode (hcom vs uvx hcom) to match
 fn build_expected_notify_line() -> String {
-    let mut parts = get_hcom_prefix();
+    let mut parts = crate::runtime_env::get_hcom_prefix();
     parts.push("codex-notify".into());
     let array_str = parts
         .iter()
@@ -425,7 +371,7 @@ fn extract_notify_line(content: &str) -> Option<String> {
 ///
 /// Dynamically detects invocation prefix (hcom vs uvx hcom) to match
 fn build_codex_rules() -> String {
-    let prefix = get_hcom_prefix();
+    let prefix = crate::runtime_env::get_hcom_prefix();
     let prefix_parts: String = prefix
         .iter()
         .map(|p| format!("\"{}\"", p))
@@ -451,7 +397,6 @@ fn build_codex_rules() -> String {
     }
     rules.join("\n") + "\n"
 }
-
 
 /// Set up Codex execpolicy rules for auto-approval.
 pub fn setup_codex_execpolicy() -> bool {
@@ -505,8 +450,8 @@ pub fn setup_codex_hooks(include_permissions: bool) -> bool {
                     // Stale command — remove and re-add
                     remove_codex_hooks();
                     // Re-read after removal
-                    let content = std::fs::read_to_string(&config_path)
-                        .map_err(|e| e.to_string())?;
+                    let content =
+                        std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
                     return insert_notify_line(&config_path, &content, &notify_line);
                 } else {
                     return Err(format!(
@@ -533,7 +478,11 @@ pub fn setup_codex_hooks(include_permissions: bool) -> bool {
     })();
 
     if let Err(e) = result {
-        log::log_error("hooks", "codex.setup_error", &format!("Failed to setup Codex hooks: {}", e));
+        log::log_error(
+            "hooks",
+            "codex.setup_error",
+            &format!("Failed to setup Codex hooks: {}", e),
+        );
         return false;
     }
 
@@ -692,8 +641,6 @@ fn remove_hooks_from_path(config_path: &Path) -> bool {
     paths::atomic_write(config_path, &result)
 }
 
-// ==================== Tests ====================
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,9 +687,7 @@ mod tests {
 
     #[test]
     fn test_is_hcom_notify_line_array() {
-        assert!(is_hcom_notify_line(
-            "notify = [\"hcom\", \"codex-notify\"]"
-        ));
+        assert!(is_hcom_notify_line("notify = [\"hcom\", \"codex-notify\"]"));
     }
 
     #[test]
@@ -908,18 +853,18 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_codex_notify_no_args() {
+    fn test_dispatch_codex_hook_no_args() {
         // Should return 0 with insufficient args
-        assert_eq!(handle_codex_notify(&["codex-notify".to_string()]), 0);
+        assert_eq!(dispatch_codex_hook(&["codex-notify".to_string()]), 0);
     }
 
     #[test]
-    fn test_handle_codex_notify_invalid_json() {
+    fn test_dispatch_codex_hook_invalid_json() {
         // Config::init() needed because log functions call Config::get()
         crate::config::Config::init();
         // Should return 0 with invalid JSON (not crash)
         assert_eq!(
-            handle_codex_notify(&["codex-notify".to_string(), "not-json".to_string()]),
+            dispatch_codex_hook(&["codex-notify".to_string(), "not-json".to_string()]),
             0
         );
     }
@@ -956,10 +901,8 @@ mod tests {
         assert!(written.contains("codex-notify"));
     }
 
-    // ==================== Codex Settings Tests ====================
-
-    use serial_test::serial;
     use crate::hooks::test_helpers::{EnvGuard, isolated_test_env};
+    use serial_test::serial;
 
     fn codex_test_env() -> (tempfile::TempDir, PathBuf, PathBuf, EnvGuard) {
         let (dir, _hcom_dir, test_home, guard) = isolated_test_env();
@@ -1058,7 +1001,10 @@ mod tests {
         let original = "notify = [\"some-other-tool\", \"arg\"]\n";
         std::fs::write(&config_path, original).unwrap();
 
-        assert!(!setup_codex_hooks(false), "should refuse existing non-hcom notify");
+        assert!(
+            !setup_codex_hooks(false),
+            "should refuse existing non-hcom notify"
+        );
 
         // File must be byte-identical to original (no corruption)
         let content = std::fs::read_to_string(&config_path).unwrap();
@@ -1214,13 +1160,19 @@ mod tests {
         // Setup
         assert!(setup_codex_hooks(false));
         let content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(content.contains("codex-notify"), "notify should be present after setup");
+        assert!(
+            content.contains("codex-notify"),
+            "notify should be present after setup"
+        );
 
         // Remove
         assert!(remove_codex_hooks());
         let content = std::fs::read_to_string(&config_path).unwrap();
         let violations = independently_verify_no_hcom_in_toml(&content);
-        assert!(violations.is_empty(), "hcom still present after remove: {violations:?}");
+        assert!(
+            violations.is_empty(),
+            "hcom still present after remove: {violations:?}"
+        );
 
         // User data preserved
         assert!(content.contains("[model]"));
@@ -1233,11 +1185,11 @@ mod tests {
     #[serial]
     fn test_codex_handles_malformed_config() {
         let corrupt_cases = vec![
-            "",                                        // empty
-            "   \n\n   ",                              // whitespace only
-            "# Just a comment",                        // comment only
-            "invalid toml [ stuff",                    // malformed
-            "[section]\nkey = value\n[another",        // incomplete section
+            "",                                 // empty
+            "   \n\n   ",                       // whitespace only
+            "# Just a comment",                 // comment only
+            "invalid toml [ stuff",             // malformed
+            "[section]\nkey = value\n[another", // incomplete section
         ];
 
         for corrupt in corrupt_cases {

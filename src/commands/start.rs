@@ -21,8 +21,8 @@ use crate::paths;
 use crate::pidtrack;
 use crate::relay;
 use crate::router::GlobalFlags;
-use crate::shared::context::HcomContext;
 use crate::shared::constants::ST_ACTIVE;
+use crate::shared::context::HcomContext;
 
 /// Parsed arguments for `hcom start`.
 #[derive(clap::Parser, Debug)]
@@ -42,10 +42,16 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     let mut filtered = vec!["start".to_string()];
     let mut skip_next = false;
     for arg in argv {
-        if skip_next { skip_next = false; continue; }
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
         match arg.as_str() {
             "start" | "--go" => continue,
-            "--name" => { skip_next = true; continue; }
+            "--name" => {
+                skip_next = true;
+                continue;
+            }
             _ => filtered.push(arg.clone()),
         }
     }
@@ -53,7 +59,10 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     use clap::Parser;
     let start_args = match StartArgs::try_parse_from(&filtered) {
         Ok(a) => a,
-        Err(e) => { e.print().ok(); return Ok(if e.use_stderr() { 1 } else { 0 }); }
+        Err(e) => {
+            e.print().ok();
+            return Ok(if e.use_stderr() { 1 } else { 0 });
+        }
     };
 
     let orphan_target = start_args.orphan;
@@ -63,21 +72,18 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     let hcom_dir = paths::hcom_dir();
 
     let ctx = HcomContext::from_os();
-    let instance_name = flags.name.clone();
+    let instance_name = flags
+        .name
+        .as_deref()
+        .map(|name| instances::resolve_display_name(&db, name).unwrap_or_else(|| name.to_string()));
 
     // BLOCK DURING ACTIVE TASKS: prevents subagents from corrupting parent/sibling instances.
     // When a subagent runs --as or bare start, process_id resolves to the parent which has
     // running_tasks.active=True. Only --name <agent_id> (explicit initiator) bypasses this gate.
     if rebind_target.is_some() || orphan_target.is_some() || instance_name.is_none() {
-        if let Ok(ident) = identity::resolve_identity(
-            &db,
-            None,
-            None,
-            None,
-            ctx.process_id.as_deref(),
-            None,
-            None,
-        ) {
+        if let Ok(ident) =
+            identity::resolve_identity(&db, None, None, None, ctx.process_id.as_deref(), None, None)
+        {
             if let Some(inst_data) = &ident.instance_data {
                 let rt_str = inst_data
                     .get("running_tasks")
@@ -105,8 +111,12 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     // Must happen BEFORE --as handling to block subagents from picking new identities.
     // Check both independently: --as matching a subagent agent_id must be blocked,
     // --name matching triggers subagent registration.
-    let subagent_via_name = instance_name.as_deref().and_then(|id| detect_subagent(&db, id));
-    let subagent_via_as = rebind_target.as_deref().and_then(|id| detect_subagent(&db, id));
+    let subagent_via_name = instance_name
+        .as_deref()
+        .and_then(|id| detect_subagent(&db, id));
+    let subagent_via_as = rebind_target
+        .as_deref()
+        .and_then(|id| detect_subagent(&db, id));
 
     if subagent_via_as.is_some() || (subagent_via_name.is_some() && rebind_target.is_some()) {
         println!("[HCOM] Subagents cannot change identity. End your turn.");
@@ -202,7 +212,11 @@ fn start_subagent(db: &HcomDb, info: &SubagentInfo) -> Result<i32> {
         .ok();
 
     if let Some(by) = stopped_by {
-        let by = if by.is_empty() { "system".to_string() } else { by };
+        let by = if by.is_empty() {
+            "system".to_string()
+        } else {
+            by
+        };
         println!(
             "[HCOM] Your session was stopped by {by}. Do not continue working. End your turn immediately."
         );
@@ -220,7 +234,7 @@ fn start_subagent(db: &HcomDb, info: &SubagentInfo) -> Result<i32> {
         .ok();
 
     if let Some(name) = existing_name {
-        instances::set_status(db, &name, ST_ACTIVE, "start", "", "", None, None);
+        instances::set_status(db, &name, ST_ACTIVE, "start", Default::default());
         println!("hcom already started for {name}");
         return Ok(0);
     }
@@ -230,7 +244,13 @@ fn start_subagent(db: &HcomDb, info: &SubagentInfo) -> Result<i32> {
         .agent_type
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let sanitized_type = sanitized_type.trim_matches('_');
     let sanitized_type = if sanitized_type.is_empty() {
@@ -266,7 +286,7 @@ fn start_subagent(db: &HcomDb, info: &SubagentInfo) -> Result<i32> {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
-    let now = crate::shared::constants::now_epoch_f64();
+    let now = crate::shared::time::now_epoch_f64();
 
     // Direct DB insert with agent_id and parent fields
     let insert_result = db.conn().execute(
@@ -294,22 +314,26 @@ fn start_subagent(db: &HcomDb, info: &SubagentInfo) -> Result<i32> {
             if err.code == rusqlite::ErrorCode::ConstraintViolation =>
         {
             let retry_name = format!("{}{}", pattern, max_n + 2);
-            db.conn().execute(
-                "INSERT INTO instances \
+            db.conn()
+                .execute(
+                    "INSERT INTO instances \
                  (name, session_id, parent_session_id, parent_name, tag, agent_id, \
                   created_at, last_event_id, directory, last_stop, status) \
                  VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, 'active')",
-                rusqlite::params![
-                    retry_name,
-                    info.parent_session_id,
-                    info.parent_name,
-                    info.parent_tag,
-                    info.agent_id,
-                    now,
-                    initial_event_id,
-                    cwd,
-                ],
-            ).map_err(|e| anyhow::anyhow!("Failed to create unique subagent name after retry: {e}"))?;
+                    rusqlite::params![
+                        retry_name,
+                        info.parent_session_id,
+                        info.parent_name,
+                        info.parent_tag,
+                        info.agent_id,
+                        now,
+                        initial_event_id,
+                        cwd,
+                    ],
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to create unique subagent name after retry: {e}")
+                })?;
             retry_name
         }
         Err(e) => return Err(anyhow::anyhow!("Failed to insert subagent instance: {e}")),
@@ -319,7 +343,13 @@ fn start_subagent(db: &HcomDb, info: &SubagentInfo) -> Result<i32> {
     instances::capture_and_store_launch_context(db, &subagent_name);
 
     // Set active status (logs life event)
-    instances::set_status(db, &subagent_name, ST_ACTIVE, "tool:start", "", "", None, None);
+    instances::set_status(
+        db,
+        &subagent_name,
+        ST_ACTIVE,
+        "tool:start",
+        Default::default(),
+    );
 
     log_info(
         "lifecycle",
@@ -339,19 +369,13 @@ fn start_subagent(db: &HcomDb, info: &SubagentInfo) -> Result<i32> {
     Ok(0)
 }
 
-/// Path A: Recover orphaned PTY process.
-///
-/// Fixes vs initial port:
-/// 1. Uses .last() for preferred_name
-/// 2. Guards on process_id presence
-/// 3. Validates name with is_valid_base_name before reuse
-/// 4. Calls remove_pid after recovery
-/// 5. Logs life/started event with reason=orphan_recover
-/// 6. Disambiguates multiple name matches
-/// 7. Passes active PIDs to get_orphan_processes
-/// 8. Prints terse recovery message instead of full bootstrap
-fn start_from_orphan(db: &HcomDb, hcom_dir: &std::path::Path, target: &str, _ctx: &HcomContext) -> Result<i32> {
-    // [Fix 7] Build active PIDs set from instances, pass to get_orphan_processes
+/// Recover orphaned PTY process by PID or name.
+fn start_from_orphan(
+    db: &HcomDb,
+    hcom_dir: &std::path::Path,
+    target: &str,
+    _ctx: &HcomContext,
+) -> Result<i32> {
     let active_pids: HashSet<u32> = db
         .iter_instances_full()?
         .iter()
@@ -370,7 +394,6 @@ fn start_from_orphan(db: &HcomDb, hcom_dir: &std::path::Path, target: &str, _ctx
             None => bail!("Orphan PID {} not found.", pid),
         }
     } else {
-        // [Fix 6] Collect all matches; error if ambiguous
         let matches: Vec<_> = orphans
             .iter()
             .filter(|o| o.names.contains(&target.to_string()))
@@ -391,13 +414,13 @@ fn start_from_orphan(db: &HcomDb, hcom_dir: &std::path::Path, target: &str, _ctx
 
     let pid = orphan.pid;
 
-    // [Fix 2] Guard: orphan must have process_id
     if orphan.process_id.is_empty() {
-        bail!("Orphan PID {} has no process_id and cannot be recovered.", pid);
+        bail!(
+            "Orphan PID {} has no process_id and cannot be recovered.",
+            pid
+        );
     }
 
-    // [Fix 1] Use .last() for preferred name
-    // [Fix 3] Validate with is_valid_base_name before reuse
     let preferred_name = orphan.names.last().cloned().unwrap_or_default();
     let can_reuse = !preferred_name.is_empty()
         && identity::is_valid_base_name(&preferred_name)
@@ -411,7 +434,6 @@ fn start_from_orphan(db: &HcomDb, hcom_dir: &std::path::Path, target: &str, _ctx
     // Core DB registration
     let _ = pidtrack::recover_single_orphan_to_db(db, orphan, &name);
 
-    // [Fix 5] Log life/started event with reason
     db.log_event(
         "life",
         &name,
@@ -424,10 +446,8 @@ fn start_from_orphan(db: &HcomDb, hcom_dir: &std::path::Path, target: &str, _ctx
     )
     .ok();
 
-    // [Fix 4] Remove pidtrack entry after recovery
     pidtrack::remove_pid(hcom_dir, pid);
 
-    // [Fix 8] Print terse recovery message instead of full bootstrap
     println!("[hcom:{}]", name);
     if can_reuse {
         println!("Recovered orphan PID {} as '{}'.", pid, name);
@@ -447,17 +467,7 @@ fn start_from_orphan(db: &HcomDb, hcom_dir: &std::path::Path, target: &str, _ctx
     Ok(0)
 }
 
-/// Path B: Rebind session identity (`--as <name>`).
-///
-///
-/// creates fresh instance preserving last_event_id, rebinds process.
-///
-/// Fixes vs initial port:
-/// 9. Resolves session_id from process binding or existing instance
-/// 10. Guards on origin_device_id before delete_instance
-/// 11. Calls migrate_notify_endpoints when identity changes
-/// 12. Calls notify_instance after rebind
-/// 13. stopped_snapshot fallback for last_event_id
+/// Rebind session identity (`--as <name>`), preserving last_event_id.
 fn start_rebind(
     db: &HcomDb,
     rebind_target: &str,
@@ -467,12 +477,12 @@ fn start_rebind(
     let hcom_dir = paths::hcom_dir();
 
     // Resolve the target name
-    let target_name = instances::resolve_display_name(db, rebind_target)
+    let target_name = instances::resolve_display_name_or_stopped(db, rebind_target)
         .unwrap_or_else(|| rebind_target.to_string());
 
     let current_name = explicit_name.unwrap_or("");
 
-    // [Fix 9] Resolve session_id from process binding or existing instance
+    // Resolve session_id from process binding or existing instance
     let mut session_id: Option<String> = None;
     if let Some(ref process_id) = ctx.process_id {
         if let Ok(Some((sid, _))) = db.get_process_binding_full(process_id) {
@@ -493,7 +503,7 @@ fn start_rebind(
         last_event_id = Some(td.last_event_id);
     }
 
-    // [Fix 13] Fallback: read cursor from stopped snapshot if instance row missing/no event_id
+    // Fallback: read cursor from stopped snapshot if instance row missing
     if last_event_id.is_none() {
         // Query stopped life event for last_event_id from snapshot
         if let Ok(eid) = load_stopped_snapshot_event_id(db, &target_name) {
@@ -506,7 +516,7 @@ fn start_rebind(
         last_event_id = Some(db.get_last_event_id());
     }
 
-    // [Fix 10] Guard: skip delete for remote instances (origin_device_id)
+    // Skip delete for remote instances (origin_device_id)
     if let Some(ref td) = target_data {
         if td.origin_device_id.is_none() || td.origin_device_id.as_deref() == Some("") {
             if let Err(e) = db.delete_instance(&target_name) {
@@ -535,7 +545,7 @@ fn start_rebind(
     instances::initialize_instance_in_position_file(
         db,
         &target_name,
-        session_id.as_deref(), // [Fix 9] pass resolved session_id
+        session_id.as_deref(),
         None, // parent_session_id
         None, // parent_name
         None, // agent_id
@@ -573,14 +583,13 @@ fn start_rebind(
             eprintln!("[hcom] warn: set_process_binding failed for {target_name}: {e}");
         }
 
-        // [Fix 11] Migrate notify endpoints before notify so wake reaches correct port
+        // Migrate notify endpoints before notify so wake reaches correct port
         if !current_name.is_empty() && current_name != target_name {
             if let Err(e) = db.migrate_notify_endpoints(current_name, &target_name) {
                 eprintln!("[hcom] warn: migrate_notify_endpoints failed: {e}");
             }
         }
 
-        // [Fix 12] Wake delivery loop to pick up restored binding
         let _ = instances::notify_instance_with_db(db, &target_name);
     }
 
@@ -650,6 +659,10 @@ fn start_bare(
     ctx: &HcomContext,
     explicit_name: Option<&str>,
 ) -> Result<i32> {
+    let explicit_name =
+        explicit_name.map(|name| instances::resolve_display_name(db, name).unwrap_or_else(|| name.to_string()));
+    let explicit_name = explicit_name.as_deref();
+
     // Skip vanilla detection if --name is provided with an existing instance
     let has_valid_identity = explicit_name
         .and_then(|n| db.get_instance_full(n).ok().flatten())
@@ -711,7 +724,12 @@ fn start_bare(
             if name.contains(':') {
                 let (rname, device_short_id) = name.rsplit_once(':').unwrap();
                 let config = crate::config::HcomConfig::load(None).unwrap_or_default();
-                if crate::relay::control::send_control_ephemeral(&config, "start", rname, device_short_id) {
+                if crate::relay::control::send_control_ephemeral(
+                    &config,
+                    "start",
+                    rname,
+                    device_short_id,
+                ) {
                     println!("Start sent to {name}");
                     return Ok(0);
                 } else {
@@ -731,7 +749,6 @@ fn start_bare(
         }
     }
 
-    // Initialize new instance
     instances::initialize_instance_in_position_file(
         db,
         &name,
@@ -789,7 +806,8 @@ fn start_bare(
             "tool": tool,
             "name": name,
         }),
-    ).ok();
+    )
+    .ok();
 
     Ok(0)
 }

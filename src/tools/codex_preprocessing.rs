@@ -1,13 +1,4 @@
-//! Codex launch preprocessing.
-//!
-//!
-//! Transforms Codex CLI arguments before launch to enable hcom functionality
-//! within Codex's sandboxed environment.
-//!
-//! Preprocessing steps:
-//!   1. Sandbox flags: --full-auto (or per mode)
-//!   2. DB access: --add-dir ~/.hcom (allows hcom writes from sandbox)
-//!   3. Bootstrap: -c developer_instructions=<bootstrap text>
+//! Codex launch preprocessing — sandbox flags, DB access, bootstrap injection.
 
 use crate::paths;
 
@@ -84,7 +75,8 @@ pub fn ensure_hcom_writable(tokens: &[String]) -> Vec<String> {
 
     // Check if --add-dir with hcom path already exists
     for (i, token) in spec.clean_tokens.iter().enumerate() {
-        if token == "--add-dir" && i + 1 < spec.clean_tokens.len()
+        if token == "--add-dir"
+            && i + 1 < spec.clean_tokens.len()
             && spec.clean_tokens[i + 1] == hcom_dir
         {
             return tokens.to_vec(); // Already present
@@ -174,7 +166,10 @@ pub fn add_codex_developer_instructions(
     };
 
     // Prepend -c developer_instructions=... to tokens
-    let mut result = vec!["-c".to_string(), format!("developer_instructions={}", combined)];
+    let mut result = vec![
+        "-c".to_string(),
+        format!("developer_instructions={}", combined),
+    ];
     result.extend(tokens);
 
     // Prepend subcommand if present
@@ -298,11 +293,7 @@ mod tests {
     fn test_ensure_hcom_writable_no_duplicate() {
         init_config();
         let hcom_dir = paths::hcom_dir().to_string_lossy().to_string();
-        let tokens = vec![
-            "--full-auto".to_string(),
-            "--add-dir".to_string(),
-            hcom_dir,
-        ];
+        let tokens = vec!["--full-auto".to_string(), "--add-dir".to_string(), hcom_dir];
         let result = ensure_hcom_writable(&tokens);
         let add_dir_count = result.iter().filter(|t| *t == "--add-dir").count();
         assert_eq!(add_dir_count, 1);

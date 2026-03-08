@@ -9,14 +9,10 @@ use std::collections::HashMap;
 use crate::db::{HcomDb, InstanceRow};
 use crate::identity;
 use crate::instances::{
-    cleanup_stale_instances, cleanup_stale_placeholders,
-    format_age, get_full_name, get_instance_status, is_remote_instance,
-    resolve_display_name,
+    cleanup_stale_instances, cleanup_stale_placeholders, format_age, get_full_name,
+    get_instance_status, is_remote_instance, resolve_display_name,
 };
-use crate::shared::{
-    CommandContext, SENDER, ST_LISTENING,
-    shorten_path, shorten_path_max, status_icon,
-};
+use crate::shared::{CommandContext, SENDER, ST_LISTENING, shorten_path_max, status_icon};
 
 /// Parsed arguments for `hcom list`.
 #[derive(clap::Parser, Debug)]
@@ -57,8 +53,8 @@ fn get_unread_count(db: &HcomDb, name: &str, last_event_id: i64) -> i64 {
     db.conn()
         .query_row(
             "SELECT COUNT(*) FROM events WHERE id > ? AND type = 'message'
-             AND json_extract(data, '$.delivered_to') LIKE ?",
-            rusqlite::params![last_event_id, format!("%\"{name}\"%")],
+             AND EXISTS (SELECT 1 FROM json_each(json_extract(data, '$.delivered_to')) WHERE value = ?)",
+            rusqlite::params![last_event_id, name],
             |row| row.get(0),
         )
         .unwrap_or(0)
@@ -103,29 +99,8 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
     let field_name = args.field.as_deref();
 
     // Resolve current instance identity
-    let (sender_identity, current_name) = if let Some(c) = ctx {
-        if let Some(ref id) = c.identity {
-            (Some(id.clone()), Some(id.name.clone()))
-        } else if let Some(name) = explicit_name {
-            match identity::resolve_identity(db, Some(name), None, None, None, None, None) {
-                Ok(id) => {
-                    let n = id.name.clone();
-                    (Some(id), Some(n))
-                }
-                Err(e) => {
-                    eprintln!("Error: Cannot resolve '{name}': {e}");
-                    return 1;
-                }
-            }
-        } else {
-            match identity::resolve_identity(db, None, None, None, None, None, None) {
-                Ok(id) => {
-                    let n = id.name.clone();
-                    (Some(id), Some(n))
-                }
-                Err(_) => (None, None),
-            }
-        }
+    let (sender_identity, current_name) = if let Some(id) = ctx.and_then(|c| c.identity.as_ref()) {
+        (Some(id.clone()), Some(id.name.clone()))
     } else if let Some(name) = explicit_name {
         match identity::resolve_identity(db, Some(name), None, None, None, None, None) {
             Ok(id) => {
@@ -138,13 +113,12 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
             }
         }
     } else {
-        match identity::resolve_identity(db, None, None, None, None, None, None) {
-            Ok(id) => {
+        identity::resolve_identity(db, None, None, None, None, None, None)
+            .map(|id| {
                 let n = id.name.clone();
                 (Some(id), Some(n))
-            }
-            Err(_) => (None, None),
-        }
+            })
+            .unwrap_or((None, None))
     };
 
     // Single instance query: hcom list <name|self> [field] [--json]
@@ -258,7 +232,8 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
             let process_bound = db.has_process_binding_for_instance(&data.name);
 
             // Parse launch_context JSON
-            let launch_context: serde_json::Value = data.launch_context
+            let launch_context: serde_json::Value = data
+                .launch_context
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .and_then(|s| serde_json::from_str(s).ok())
@@ -299,10 +274,13 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
                     let bytes = template.as_bytes();
                     while i < bytes.len() {
                         if bytes[i] == b'{' {
-                            if let Some(end) = template[i+1..].find('}') {
-                                let key = &template[i+1..i+1+end];
+                            if let Some(end) = template[i + 1..].find('}') {
+                                let key = &template[i + 1..i + 1 + end];
                                 if !key.is_empty() && !obj.contains_key(key) {
-                                    eprintln!("Error: unknown field '{{{}}}' in --format template", key);
+                                    eprintln!(
+                                        "Error: unknown field '{{{}}}' in --format template",
+                                        key
+                                    );
                                     return 1;
                                 }
                                 i += end + 2;
@@ -327,7 +305,10 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
                 println!("{line}");
             }
         } else {
-            println!("{}", serde_json::to_string(&result_list).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string(&result_list).unwrap_or_default()
+            );
         }
         return 0;
     }
@@ -426,12 +407,24 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
         };
 
         // Badges
-        let headless_badge = if data.background != 0 { " [headless]" } else { "" };
-        let remote_badge = if is_remote_instance(data) { " [remote]" } else { "" };
+        let headless_badge = if data.background != 0 {
+            " [headless]"
+        } else {
+            ""
+        };
+        let remote_badge = if is_remote_instance(data) {
+            " [remote]"
+        } else {
+            ""
+        };
 
         // Unread
         let unread = unread_counts.get(&data.name).copied().unwrap_or(0);
-        let unread_str = if unread > 0 { format!(" +{unread}") } else { String::new() };
+        let unread_str = if unread > 0 {
+            format!(" +{unread}")
+        } else {
+            String::new()
+        };
 
         // Listening-since suffix: show idle duration for listening agents idle >= 60s
         let listening_since = if status == ST_LISTENING && cs.age_seconds >= 60 {
@@ -449,8 +442,9 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
                     .and_then(|p| p.subagent_timeout)
             } else {
                 None
-            }.unwrap_or_else(|| crate::config::load_config_snapshot().core.subagent_timeout);
-            let remaining = timeout - cs.age_seconds;
+            }
+            .unwrap_or_else(|| crate::config::load_config_snapshot().core.subagent_timeout);
+            let remaining = timeout.saturating_sub(cs.age_seconds);
             if remaining > 0 && remaining < 10 {
                 format!(" \u{23f1} {remaining}s")
             } else {
@@ -461,18 +455,30 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
         };
 
         let name_part = format!("{name}{headless_badge}{remote_badge}{unread_str}");
-        let status_text = format!("{age_display}{desc_sep}{description}{listening_since}{timeout_marker}");
+        let status_text =
+            format!("{age_display}{desc_sep}{description}{listening_since}{timeout_marker}");
 
-        println!("{tool_prefix}{icon} {name_part:<width$}{status_text}", width = name_col_width);
+        println!(
+            "{tool_prefix}{icon} {name_part:<width$}{status_text}",
+            width = name_col_width
+        );
 
         if verbose_output {
             let session_id = data.session_id.as_deref().unwrap_or("(none)");
-            let directory_display = if data.directory.is_empty() { "(none)".to_string() } else { shorten_path_max(&data.directory, 60) };
+            let directory_display = if data.directory.is_empty() {
+                "(none)".to_string()
+            } else {
+                shorten_path_max(&data.directory, 60)
+            };
             let parent = data.parent_name.as_deref().unwrap_or("(none)");
-            let tool_display = if data.tool == "adhoc" { "ad-hoc" } else { &data.tool };
+            let tool_display = if data.tool == "adhoc" {
+                "ad-hoc"
+            } else {
+                &data.tool
+            };
 
             let created_str = if data.created_at > 0.0 {
-                let now = crate::shared::constants::now_epoch_f64();
+                let now = crate::shared::time::now_epoch_f64();
                 let age_f = now - data.created_at;
                 // format_age takes i64 where 0 → "now". Use f64 threshold
                 // so sub-second ages display as "0s" instead of "now".
@@ -480,7 +486,11 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
                     "now".to_string()
                 } else {
                     let secs = age_f as i64;
-                    if secs < 60 { format!("{secs}s") } else { format_age(secs) }
+                    if secs < 60 {
+                        format!("{secs}s")
+                    } else {
+                        format_age(secs)
+                    }
                 };
                 format!("{age_str} ago")
             } else {
@@ -509,9 +519,16 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
             };
             println!("    bindings:     {bind_str}");
 
-            let transcript = if data.transcript_path.is_empty() { "(none)".to_string() } else { shorten_path_max(&data.transcript_path, 60) };
+            let transcript = if data.transcript_path.is_empty() {
+                "(none)".to_string()
+            } else {
+                shorten_path_max(&data.transcript_path, 60)
+            };
             if data.background != 0 && !data.background_log_file.is_empty() {
-                println!("    headless log: {}", shorten_path_max(&data.background_log_file, 60));
+                println!(
+                    "    headless log: {}",
+                    shorten_path_max(&data.background_log_file, 60)
+                );
             }
             println!("    transcript:   {transcript}");
 
@@ -532,13 +549,18 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
     }
 
     // Recently stopped summary
-    let active_names: std::collections::HashSet<String> = sorted_instances.iter().map(|d| d.name.clone()).collect();
+    let active_names: std::collections::HashSet<String> =
+        sorted_instances.iter().map(|d| d.name.clone()).collect();
     let recently_stopped = get_recently_stopped(db, &active_names);
     if !recently_stopped.is_empty() {
         let names = if recently_stopped.len() <= 5 {
             recently_stopped.join(", ")
         } else {
-            format!("{} +{}", recently_stopped[..5].join(", "), recently_stopped.len() - 5)
+            format!(
+                "{} +{}",
+                recently_stopped[..5].join(", "),
+                recently_stopped.len() - 5
+            )
         };
         println!("\nRecently stopped (10m): {names}");
         println!("  -> hcom list --stopped [name]");
@@ -551,7 +573,12 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
             if let Ok(entries) = std::fs::read_dir(&archive_dir) {
                 let archive_count = entries
                     .filter_map(|e| e.ok())
-                    .filter(|e| e.file_name().to_str().map(|s| s.starts_with("session-")).unwrap_or(false))
+                    .filter(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|s| s.starts_with("session-"))
+                            .unwrap_or(false)
+                    })
                     .count();
                 if archive_count > 0 {
                     let plural = if archive_count != 1 { "s" } else { "" };
@@ -578,9 +605,18 @@ fn extract_field_value(payload: &serde_json::Value, field: &str) -> String {
 /// Print shell-export format for `hcom list --sh`.
 fn print_sh_exports(payload: &serde_json::Value) {
     let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    let session_id = payload.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
-    let status = payload.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-    let directory = payload.get("directory").and_then(|v| v.as_str()).unwrap_or("");
+    let session_id = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let status = payload
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let directory = payload
+        .get("directory")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     println!("export HCOM_INSTANCE_NAME={}", shell_quote(name));
     println!("export HCOM_SID={}", shell_quote(session_id));
@@ -601,18 +637,21 @@ fn cmd_list_stopped(db: &HcomDb, args: &ListArgs) -> i32 {
     let last_n: usize = args.last.unwrap_or(20);
     let filter_name = args.name.as_deref();
 
-    let now = crate::shared::constants::now_epoch_f64();
+    let now = crate::shared::time::now_epoch_f64();
 
     let limit = if show_all { 10000 } else { last_n };
 
     let (query, param) = if let Some(name) = filter_name {
+        let name = crate::instances::resolve_display_name_or_stopped(db, name)
+            .unwrap_or_else(|| name.to_string());
         // Fix: fetch up to 10000 events for named instance (was LIMIT 1)
         (
             "SELECT instance, timestamp, data FROM events
              WHERE type = 'life' AND json_extract(data, '$.action') = 'stopped'
              AND instance = ?
-             ORDER BY id DESC LIMIT 10000".to_string(),
-            name.to_string(),
+             ORDER BY id DESC LIMIT 10000"
+                .to_string(),
+            name,
         )
     } else {
         (
@@ -713,7 +752,11 @@ fn cmd_list_stopped(db: &HcomDb, args: &ListArgs) -> i32 {
                 } else {
                     e.timestamp.clone()
                 };
-                let by_part = if by.is_empty() { String::new() } else { format!(" by:{by}") };
+                let by_part = if by.is_empty() {
+                    String::new()
+                } else {
+                    format!(" by:{by}")
+                };
                 let marker = if i == 0 { " (latest)" } else { "" };
                 println!("    {age} ago  [{reason}{by_part}]{marker}");
             }
@@ -740,9 +783,20 @@ fn cmd_list_stopped(db: &HcomDb, args: &ListArgs) -> i32 {
             } else {
                 entry.timestamp.clone()
             };
-            let tag_part = if tag.is_empty() { String::new() } else { format!(" tag:{tag}") };
-            let by_part = if by.is_empty() { String::new() } else { format!(" by:{by}") };
-            println!("  {} ({tool}{tag_part}) {age} ago  [{reason}{by_part}]", entry.instance);
+            let tag_part = if tag.is_empty() {
+                String::new()
+            } else {
+                format!(" tag:{tag}")
+            };
+            let by_part = if by.is_empty() {
+                String::new()
+            } else {
+                format!(" by:{by}")
+            };
+            println!(
+                "  {} ({tool}{tag_part}) {age} ago  [{reason}{by_part}]",
+                entry.instance
+            );
         }
         if !show_all {
             println!("\n  --all: show all  |  --last N: show last N");
@@ -755,8 +809,11 @@ fn cmd_list_stopped(db: &HcomDb, args: &ListArgs) -> i32 {
 }
 
 /// Get names of recently stopped instances (within 10 minutes).
-fn get_recently_stopped(db: &HcomDb, exclude_active: &std::collections::HashSet<String>) -> Vec<String> {
-    let now = crate::shared::constants::now_epoch_f64();
+fn get_recently_stopped(
+    db: &HcomDb,
+    exclude_active: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let now = crate::shared::time::now_epoch_f64();
     let cutoff = now - crate::instances::RECENTLY_STOPPED_WINDOW;
     let cutoff_ts = chrono::DateTime::from_timestamp(cutoff as i64, 0)
         .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
@@ -766,7 +823,7 @@ fn get_recently_stopped(db: &HcomDb, exclude_active: &std::collections::HashSet<
         "SELECT DISTINCT instance FROM events
          WHERE type = 'life' AND json_extract(data, '$.action') = 'stopped'
          AND timestamp > ?
-         ORDER BY id DESC"
+         ORDER BY id DESC",
     ) else {
         return vec![];
     };

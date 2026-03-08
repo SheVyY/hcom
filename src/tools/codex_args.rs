@@ -11,16 +11,31 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use super::args_common::{
-    self, deduplicate_boolean_flags, extract_flag_name_from_token, extract_flag_names_from_tokens,
-    remove_positional, set_positional, shell_quote, shell_split, toggle_flag, FlagValue, SourceType,
+    self, FlagValue, SourceType, deduplicate_boolean_flags, extract_flag_name_from_token,
+    extract_flag_names_from_tokens, remove_positional, set_positional, shell_quote, shell_split,
+    toggle_flag,
 };
 
-// ==================== Constants ====================
-
 const SUBCOMMANDS: &[&str] = &[
-    "exec", "e", "resume", "fork", "review", "mcp", "mcp-server", "app-server",
-    "login", "logout", "completion", "sandbox", "debug", "apply", "app", "a",
-    "cloud", "features", "help",
+    "exec",
+    "e",
+    "resume",
+    "fork",
+    "review",
+    "mcp",
+    "mcp-server",
+    "app-server",
+    "login",
+    "logout",
+    "completion",
+    "sandbox",
+    "debug",
+    "apply",
+    "app",
+    "a",
+    "cloud",
+    "features",
+    "help",
 ];
 
 const EXEC_SUBCOMMANDS: &[&str] = &["exec", "e"];
@@ -33,26 +48,66 @@ const CASE_SENSITIVE_FLAGS: &[(&str, &str)] = &[("-C", "--cd"), ("-c", "--config
 const CASE_SENSITIVE_BOOLEAN_FLAGS: &[&str] = &["-V"];
 
 const BOOLEAN_FLAGS: &[&str] = &[
-    "--oss", "--full-auto", "--dangerously-bypass-approvals-and-sandbox",
-    "--search", "--no-alt-screen", "-h", "--help", "--version",
-    "--skip-git-repo-check", "--json", "--last", "--all", "--uncommitted",
+    "--oss",
+    "--full-auto",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--search",
+    "--no-alt-screen",
+    "-h",
+    "--help",
+    "--version",
+    "--skip-git-repo-check",
+    "--json",
+    "--last",
+    "--all",
+    "--uncommitted",
 ];
 
 const VALUE_FLAGS: &[&str] = &[
-    "-c", "--config", "--enable", "--disable", "-i", "--image", "-m", "--model",
-    "--local-provider", "-p", "--profile", "-s", "--sandbox", "-a",
-    "--ask-for-approval", "--cd", "--add-dir", "--color", "-o",
-    "--output-last-message", "--output-schema", "--base", "--commit", "--title",
+    "-c",
+    "--config",
+    "--enable",
+    "--disable",
+    "-i",
+    "--image",
+    "-m",
+    "--model",
+    "--local-provider",
+    "-p",
+    "--profile",
+    "-s",
+    "--sandbox",
+    "-a",
+    "--ask-for-approval",
+    "--cd",
+    "--add-dir",
+    "--color",
+    "-o",
+    "--output-last-message",
+    "--output-schema",
+    "--base",
+    "--commit",
+    "--title",
 ];
 
 const CASE_SENSITIVE_VALUE_FLAGS: &[&str] = &["-C", "-c"];
 
 const REPEATABLE_FLAGS: &[&str] = &[
-    "-c", "--config", "--enable", "--disable", "-i", "--image", "--add-dir",
+    "-c",
+    "--config",
+    "--enable",
+    "--disable",
+    "-i",
+    "--image",
+    "--add-dir",
 ];
 
 const SANDBOX_FLAGS: &[&str] = &[
-    "--sandbox", "-s", "-a", "--ask-for-approval", "--full-auto",
+    "--sandbox",
+    "-s",
+    "-a",
+    "--ask-for-approval",
+    "--full-auto",
     "--dangerously-bypass-approvals-and-sandbox",
 ];
 
@@ -70,8 +125,6 @@ fn flag_aliases() -> &'static HashMap<&'static str, &'static str> {
         m
     })
 }
-
-// ==================== Pre-computed lookups ====================
 
 struct CodexFlagLookup {
     bool_set: HashSet<String>,
@@ -93,14 +146,23 @@ fn flag_lookup() -> &'static CodexFlagLookup {
     LOOKUP.get_or_init(|| {
         let bool_set: HashSet<String> = BOOLEAN_FLAGS.iter().map(|s| s.to_string()).collect();
         let value_set: HashSet<String> = VALUE_FLAGS.iter().map(|s| s.to_string()).collect();
-        let repeatable_set: HashSet<String> = REPEATABLE_FLAGS.iter().map(|s| s.to_string()).collect();
+        let repeatable_set: HashSet<String> =
+            REPEATABLE_FLAGS.iter().map(|s| s.to_string()).collect();
         let sandbox_set: HashSet<String> = SANDBOX_FLAGS.iter().map(|s| s.to_string()).collect();
 
         let mut exact_flags = HashSet::new();
-        for f in BOOLEAN_FLAGS { exact_flags.insert(f.to_string()); }
-        for f in VALUE_FLAGS { exact_flags.insert(f.to_string()); }
-        for (k, _) in flag_aliases().iter() { exact_flags.insert(k.to_string()); }
-        for sub in SUBCOMMANDS { exact_flags.insert(sub.to_string()); }
+        for f in BOOLEAN_FLAGS {
+            exact_flags.insert(f.to_string());
+        }
+        for f in VALUE_FLAGS {
+            exact_flags.insert(f.to_string());
+        }
+        for (k, _) in flag_aliases().iter() {
+            exact_flags.insert(k.to_string());
+        }
+        for sub in SUBCOMMANDS {
+            exact_flags.insert(sub.to_string());
+        }
         exact_flags.insert("--".to_string());
 
         let mut prefix_flags = Vec::new();
@@ -114,11 +176,21 @@ fn flag_lookup() -> &'static CodexFlagLookup {
             .collect();
 
         let mut known_set: HashSet<String> = HashSet::new();
-        for f in BOOLEAN_FLAGS { known_set.insert(f.to_string()); }
-        for f in CASE_SENSITIVE_BOOLEAN_FLAGS { known_set.insert(f.to_string()); }
-        for f in VALUE_FLAGS { known_set.insert(f.to_string()); }
-        for f in CASE_SENSITIVE_VALUE_FLAGS { known_set.insert(f.to_string()); }
-        for f in SUBCOMMANDS { known_set.insert(f.to_string()); }
+        for f in BOOLEAN_FLAGS {
+            known_set.insert(f.to_string());
+        }
+        for f in CASE_SENSITIVE_BOOLEAN_FLAGS {
+            known_set.insert(f.to_string());
+        }
+        for f in VALUE_FLAGS {
+            known_set.insert(f.to_string());
+        }
+        for f in CASE_SENSITIVE_VALUE_FLAGS {
+            known_set.insert(f.to_string());
+        }
+        for f in SUBCOMMANDS {
+            known_set.insert(f.to_string());
+        }
         for (k, v) in flag_aliases().iter() {
             known_set.insert(k.to_string());
             known_set.insert(v.to_string());
@@ -143,8 +215,6 @@ fn looks_like_flag(token_lower: &str) -> bool {
     let lookup = flag_lookup();
     args_common::looks_like_flag(token_lower, &lookup.exact_flags, &lookup.prefix_flags)
 }
-
-// ==================== CodexArgsSpec ====================
 
 /// Normalized representation of Codex CLI arguments.
 #[derive(Debug, Clone)]
@@ -178,7 +248,11 @@ impl CodexArgsSpec {
             .join(" ")
     }
 
-    pub fn rebuild_tokens(&self, include_positionals: bool, include_subcommand: bool) -> Vec<String> {
+    pub fn rebuild_tokens(
+        &self,
+        include_positionals: bool,
+        include_subcommand: bool,
+    ) -> Vec<String> {
         args_common::rebuild_tokens_from(
             &self.clean_tokens,
             &self.positional_indexes,
@@ -237,8 +311,7 @@ impl CodexArgsSpec {
                 }
             }
 
-            if !found_eq && possible_flags.contains(&token_lower)
-                && i + 1 < self.clean_tokens.len()
+            if !found_eq && possible_flags.contains(&token_lower) && i + 1 < self.clean_tokens.len()
             {
                 let next = &self.clean_tokens[i + 1];
                 if !looks_like_flag(&next.to_lowercase()) {
@@ -299,13 +372,8 @@ impl CodexArgsSpec {
     }
 }
 
-// ==================== Public API ====================
-
 /// Resolve Codex args from CLI (highest precedence) or env string.
-pub fn resolve_codex_args(
-    cli_args: Option<&[String]>,
-    env_value: Option<&str>,
-) -> CodexArgsSpec {
+pub fn resolve_codex_args(cli_args: Option<&[String]>, env_value: Option<&str>) -> CodexArgsSpec {
     if let Some(args) = cli_args {
         if !args.is_empty() {
             return parse_tokens(args, SourceType::Cli);
@@ -334,12 +402,12 @@ pub fn resolve_codex_args(
 ///
 /// Special: sandbox flags are a GROUP — if CLI has ANY sandbox flag,
 /// ALL sandbox flags are stripped from env.
-pub fn merge_codex_args(
-    env_spec: &CodexArgsSpec,
-    cli_spec: &CodexArgsSpec,
-) -> CodexArgsSpec {
+pub fn merge_codex_args(env_spec: &CodexArgsSpec, cli_spec: &CodexArgsSpec) -> CodexArgsSpec {
     let lookup = flag_lookup();
-    let final_subcommand = cli_spec.subcommand.clone().or_else(|| env_spec.subcommand.clone());
+    let final_subcommand = cli_spec
+        .subcommand
+        .clone()
+        .or_else(|| env_spec.subcommand.clone());
 
     let final_positionals: Vec<String> = if !cli_spec.positional_tokens.is_empty() {
         if cli_spec.positional_tokens == [""] {
@@ -354,7 +422,9 @@ pub fn merge_codex_args(
     let mut cli_flag_names = extract_flag_names_from_tokens(&cli_spec.clean_tokens);
 
     // Sandbox group: if CLI has ANY sandbox flag, strip ALL from env
-    let cli_has_sandbox = cli_flag_names.iter().any(|f| lookup.sandbox_set.contains(f));
+    let cli_has_sandbox = cli_flag_names
+        .iter()
+        .any(|f| lookup.sandbox_set.contains(f));
     if cli_has_sandbox {
         for sf in &lookup.sandbox_set {
             cli_flag_names.insert(sf.clone());
@@ -374,9 +444,7 @@ pub fn merge_codex_args(
             continue;
         }
         if let Some(flag_name) = extract_flag_name_from_token(token) {
-            if cli_flag_names.contains(&flag_name)
-                && !lookup.repeatable_set.contains(&flag_name)
-            {
+            if cli_flag_names.contains(&flag_name) && !lookup.repeatable_set.contains(&flag_name) {
                 if !token.contains('=') && i + 1 < env_spec.clean_tokens.len() {
                     let next = &env_spec.clean_tokens[i + 1];
                     if !looks_like_flag(&next.to_lowercase()) {
@@ -447,8 +515,6 @@ pub fn validate_conflicts(spec: &CodexArgsSpec) -> Vec<String> {
     warnings
 }
 
-// ==================== Internal Parser ====================
-
 fn parse_tokens(tokens: &[impl AsRef<str>], source: SourceType) -> CodexArgsSpec {
     parse_tokens_with_errors(tokens, source, vec![])
 }
@@ -504,11 +570,7 @@ fn parse_tokens_with_errors(
 
             // Determine flag key: case-sensitive or lowercase
             let is_cs = CASE_SENSITIVE_VALUE_FLAGS.contains(&pf.as_str());
-            let flag_key = if is_cs {
-                pf.clone()
-            } else {
-                pf.to_lowercase()
-            };
+            let flag_key = if is_cs { pf.clone() } else { pf.to_lowercase() };
             let is_repeatable = if is_cs {
                 // -c is repeatable (lowercase), -C is not
                 *pf == pf.to_lowercase() && lookup.repeatable_set.contains(&pf.to_lowercase())
@@ -675,8 +737,6 @@ fn parse_tokens_with_errors(
         is_exec,
     }
 }
-
-// ==================== Tests ====================
 
 #[cfg(test)]
 mod tests {
@@ -865,10 +925,12 @@ mod tests {
         let updated = spec.update(None, None, None, Some("use hcom"));
         // Should have -c developer_instructions=use hcom prepended
         assert!(updated.clean_tokens.contains(&"-c".to_string()));
-        assert!(updated
-            .clean_tokens
-            .iter()
-            .any(|t| t.starts_with("developer_instructions=")));
+        assert!(
+            updated
+                .clean_tokens
+                .iter()
+                .any(|t| t.starts_with("developer_instructions="))
+        );
     }
 
     #[test]

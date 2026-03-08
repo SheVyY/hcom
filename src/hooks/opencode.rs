@@ -1,12 +1,4 @@
-//! OpenCode hook handlers (4 hooks).
-//!
-//! OpenCode plugin shells out to hcom for lifecycle management:
-//!   - opencode-start: bind session, return instance name + bootstrap
-//!   - opencode-status: update status
-//!   - opencode-read: fetch messages (4 modes)
-//!   - opencode-stop: finalize session
-//!
-//! Commands use argv flags (not JSON payload like Claude/Gemini).
+//! OpenCode hook handlers — argv-based lifecycle management (start, status, read, stop).
 
 use std::time::Instant;
 
@@ -17,14 +9,12 @@ use crate::db::HcomDb;
 use crate::instances;
 use crate::log::{log_error, log_info};
 use crate::messages;
+use crate::shared::ST_LISTENING;
 use crate::shared::constants::MAX_MESSAGES_PER_DELIVERY;
 use crate::shared::context::HcomContext;
-use crate::shared::ST_LISTENING;
 
 use super::common;
 use super::common::finalize_session;
-
-// ==================== Argv Helpers ====================
 
 /// Extract `--flag value` from argv. Returns None if not found.
 fn parse_flag(argv: &[String], flag: &str) -> Option<String> {
@@ -39,12 +29,17 @@ fn has_flag(argv: &[String], flag: &str) -> bool {
     argv.iter().any(|a| a == flag)
 }
 
-// ==================== Notify Helpers ====================
-
 /// Upsert plugin notify endpoint in DB.
 fn upsert_plugin_notify_endpoint(db: &HcomDb, instance_name: &str, port: u16) {
     if let Err(e) = db.upsert_notify_endpoint(instance_name, "plugin", port) {
-        log_error("native", "opencode.register_notify_fail", &format!("Failed to register plugin notify port for {}: {}", instance_name, e));
+        log_error(
+            "native",
+            "opencode.register_notify_fail",
+            &format!(
+                "Failed to register plugin notify port for {}: {}",
+                instance_name, e
+            ),
+        );
     }
 }
 
@@ -55,8 +50,6 @@ fn upsert_plugin_notify_endpoint(db: &HcomDb, instance_name: &str, port: u16) {
 fn notify_all_endpoints(db: &HcomDb, instance_name: &str) {
     instances::notify_instance_endpoints(db, instance_name, &[]);
 }
-
-// ==================== Transcript Path ====================
 
 /// Get path to OpenCode's SQLite database.
 ///
@@ -77,8 +70,6 @@ fn get_opencode_db_path() -> Option<String> {
     }
 }
 
-// ==================== Handler: opencode-start ====================
-
 /// Handle opencode-start: bind session to process, set listening status.
 ///
 /// Called by OpenCode plugin on session.created event.
@@ -91,8 +82,7 @@ fn handle_start(ctx: &HcomContext, db: &HcomDb, argv: &[String]) -> (i32, String
         None => return (0, r#"{"error":"Missing --session-id"}"#.to_string()),
     };
 
-    let notify_port: Option<u16> = parse_flag(argv, "--notify-port")
-        .and_then(|s| s.parse().ok());
+    let notify_port: Option<u16> = parse_flag(argv, "--notify-port").and_then(|s| s.parse().ok());
 
     let process_id = match &ctx.process_id {
         Some(pid) => pid.clone(),
@@ -110,7 +100,13 @@ fn handle_start(ctx: &HcomContext, db: &HcomDb, argv: &[String]) -> (i32, String
         }
 
         instances::update_instance_position(db, &existing_name, &rebind_updates);
-        instances::set_status(db, &existing_name, ST_LISTENING, "start", "", "", None, None);
+        instances::set_status(
+            db,
+            &existing_name,
+            ST_LISTENING,
+            "start",
+            Default::default(),
+        );
 
         let hcom_config = crate::config::HcomConfig::load(None).unwrap_or_default();
         let bootstrap_text = bootstrap::get_bootstrap(
@@ -145,9 +141,15 @@ fn handle_start(ctx: &HcomContext, db: &HcomDb, argv: &[String]) -> (i32, String
     }
 
     // Normal binding path
-    let instance_name = match instances::bind_session_to_process(db, &session_id, Some(&process_id)) {
+    let instance_name = match instances::bind_session_to_process(db, &session_id, Some(&process_id))
+    {
         Some(name) => name,
-        None => return (0, r#"{"error":"No instance bound to this process"}"#.to_string()),
+        None => {
+            return (
+                0,
+                r#"{"error":"No instance bound to this process"}"#.to_string(),
+            );
+        }
     };
 
     // Rebind session and initialize
@@ -178,7 +180,13 @@ fn handle_start(ctx: &HcomContext, db: &HcomDb, argv: &[String]) -> (i32, String
         }
     }
 
-    instances::set_status(db, &instance_name, ST_LISTENING, "start", "", "", None, None);
+    instances::set_status(
+        db,
+        &instance_name,
+        ST_LISTENING,
+        "start",
+        Default::default(),
+    );
 
     // Capture launch context (preserves pane_id/terminal_preset from Rust PTY)
     instances::capture_and_store_launch_context(db, &instance_name);
@@ -213,7 +221,11 @@ fn handle_start(ctx: &HcomContext, db: &HcomDb, argv: &[String]) -> (i32, String
     let hcom_config = crate::config::HcomConfig::load(None).unwrap_or_default();
     let relay_enabled = crate::relay::is_relay_enabled(&hcom_config);
     // Use config tag as fallback when instance has no tag
-    let effective_tag = if tag.is_empty() { &hcom_config.tag } else { &tag };
+    let effective_tag = if tag.is_empty() {
+        &hcom_config.tag
+    } else {
+        &tag
+    };
     let bootstrap_text = bootstrap::get_bootstrap(
         db,
         &ctx.hcom_dir,
@@ -238,8 +250,6 @@ fn handle_start(ctx: &HcomContext, db: &HcomDb, argv: &[String]) -> (i32, String
     (0, serde_json::to_string(&response).unwrap_or_default())
 }
 
-// ==================== Handler: opencode-status ====================
-
 /// Handle opencode-status: update instance status.
 ///
 /// Called by OpenCode plugin on session.status and session.idle events.
@@ -257,7 +267,16 @@ fn handle_status(db: &HcomDb, argv: &[String]) -> (i32, String) {
     let context = parse_flag(argv, "--context").unwrap_or_default();
     let detail = parse_flag(argv, "--detail").unwrap_or_default();
 
-    instances::set_status(db, &name, &status, &context, &detail, "", None, None);
+    instances::set_status(
+        db,
+        &name,
+        &status,
+        &context,
+        instances::StatusUpdate {
+            detail: &detail,
+            ..Default::default()
+        },
+    );
 
     // Wake delivery thread if instance is now listening
     if status == ST_LISTENING {
@@ -266,8 +285,6 @@ fn handle_status(db: &HcomDb, argv: &[String]) -> (i32, String) {
 
     (0, r#"{"ok":true}"#.to_string())
 }
-
-// ==================== Handler: opencode-read ====================
 
 /// Handle opencode-read: fetch pending messages, check, format, or ack.
 ///
@@ -291,10 +308,7 @@ fn handle_read(db: &HcomDb, argv: &[String]) -> (i32, String) {
     let raw_messages = db.get_unread_messages(&name);
 
     // Convert db::Message to serde_json::Value
-    let messages: Vec<Value> = raw_messages
-        .iter()
-        .map(common::message_to_value)
-        .collect();
+    let messages: Vec<Value> = raw_messages.iter().map(common::message_to_value).collect();
 
     if format_mode {
         if messages.is_empty() {
@@ -305,7 +319,7 @@ fn handle_read(db: &HcomDb, argv: &[String]) -> (i32, String) {
         } else {
             &messages
         };
-        let get_instance_data = common::make_instance_lookup(&db);
+        let get_instance_data = common::make_instance_lookup(db);
         let hints = common::load_config_hints();
         let get_config_hints = || hints.clone();
         let formatted = messages::format_messages_json(
@@ -329,7 +343,7 @@ fn handle_read(db: &HcomDb, argv: &[String]) -> (i32, String) {
                         0,
                         serde_json::json!({"error": format!("Invalid --up-to: {}", up_to_str)})
                             .to_string(),
-                    )
+                    );
                 }
             };
             let mut updates = serde_json::Map::new();
@@ -347,27 +361,32 @@ fn handle_read(db: &HcomDb, argv: &[String]) -> (i32, String) {
             .max()
             .unwrap_or(0);
         // Fallback: when all event_ids are 0, use db max
-        let ack_id = if last_id > 0 { last_id } else { db.get_last_event_id() };
+        let ack_id = if last_id > 0 {
+            last_id
+        } else {
+            db.get_last_event_id()
+        };
         if ack_id > 0 {
             let mut updates = serde_json::Map::new();
             updates.insert("last_event_id".into(), serde_json::json!(ack_id));
             instances::update_instance_position(db, &name, &updates);
         }
-        return (
-            0,
-            serde_json::json!({"acked": messages.len()}).to_string(),
-        );
+        return (0, serde_json::json!({"acked": messages.len()}).to_string());
     }
 
     if check_mode {
-        return (0, if messages.is_empty() { "false" } else { "true" }.to_string());
+        return (
+            0,
+            if messages.is_empty() { "false" } else { "true" }.to_string(),
+        );
     }
 
     // Default: return raw JSON array
-    (0, serde_json::to_string(&messages).unwrap_or_else(|_| "[]".to_string()))
+    (
+        0,
+        serde_json::to_string(&messages).unwrap_or_else(|_| "[]".to_string()),
+    )
 }
-
-// ==================== Handler: opencode-stop ====================
 
 /// Handle opencode-stop: finalize session and clean up instance.
 ///
@@ -384,8 +403,6 @@ fn handle_stop(db: &HcomDb, argv: &[String]) -> (i32, String) {
 
     (0, r#"{"ok":true}"#.to_string())
 }
-
-// ==================== Dispatcher ====================
 
 /// Dispatch an OpenCode hook by name.
 ///
@@ -410,7 +427,10 @@ pub fn dispatch_opencode_hook(hook_name: &str, argv: &[String]) -> (i32, String)
                 "hook.error",
                 &format!("hook={} op=db_open err={}", hook_name, e),
             );
-            return (0, serde_json::json!({"error": format!("DB open failed: {}", e)}).to_string());
+            return (
+                0,
+                serde_json::json!({"error": format!("DB open failed: {}", e)}).to_string(),
+            );
         }
     };
 
@@ -430,28 +450,25 @@ pub fn dispatch_opencode_hook(hook_name: &str, argv: &[String]) -> (i32, String)
     let handler_start = Instant::now();
     let hook_name_owned = hook_name.to_string();
 
-    // Dispatch with panic safety (matches Gemini's catch_unwind pattern)
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        match hook_name_owned.as_str() {
+    let (exit_code, output) = common::dispatch_with_panic_guard(
+        "opencode",
+        &hook_name_owned,
+        (
+            0,
+            serde_json::json!({"error": "internal panic"}).to_string(),
+        ),
+        || match hook_name_owned.as_str() {
             "opencode-start" => handle_start(&ctx, &db, &handler_argv),
             "opencode-status" => handle_status(&db, &handler_argv),
             "opencode-read" => handle_read(&db, &handler_argv),
             "opencode-stop" => handle_stop(&db, &handler_argv),
-            _ => (0, serde_json::json!({"error": format!("Unknown OpenCode hook: {}", hook_name_owned)}).to_string()),
-        }
-    }));
-
-    let (exit_code, output) = match result {
-        Ok(r) => r,
-        Err(_) => {
-            log_error(
-                "hooks",
-                "opencode.dispatch.panic",
-                &format!("hook={}", hook_name),
-            );
-            return (0, serde_json::json!({"error": "internal panic"}).to_string());
-        }
-    };
+            _ => (
+                0,
+                serde_json::json!({"error": format!("Unknown OpenCode hook: {}", hook_name_owned)})
+                    .to_string(),
+            ),
+        },
+    );
 
     let handler_ms = handler_start.elapsed().as_secs_f64() * 1000.0;
     let total_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -466,8 +483,6 @@ pub fn dispatch_opencode_hook(hook_name: &str, argv: &[String]) -> (i32, String)
 
     (exit_code, output)
 }
-
-// ==================== Plugin Management ====================
 
 /// Embedded hcom.ts plugin source (compiled into the binary).
 pub const PLUGIN_SOURCE: &str = include_str!("../opencode_plugin/hcom.ts");
@@ -581,8 +596,6 @@ pub fn ensure_plugin_installed() -> bool {
     }
     install_opencode_plugin().unwrap_or(false)
 }
-
-// ==================== Tests ====================
 
 #[cfg(test)]
 mod tests {
@@ -793,7 +806,14 @@ mod tests {
             "INSERT INTO instances (name, tool, status, status_context, status_time, created_at) VALUES ('testinst', 'opencode', 'active', 'new', 0, 0)",
             [],
         );
-        let argv = sv(&["--name", "testinst", "--status", "listening", "--context", "idle"]);
+        let argv = sv(&[
+            "--name",
+            "testinst",
+            "--status",
+            "listening",
+            "--context",
+            "idle",
+        ]);
         let (code, output) = handle_status(&db, &argv);
         assert_eq!(code, 0);
         assert!(output.contains("\"ok\":true") || output.contains("\"ok\": true"));

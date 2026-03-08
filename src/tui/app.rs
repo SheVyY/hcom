@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::io::Stdout;
 use std::time::Duration;
 
-use color_eyre::Result;
+use anyhow::Result;
 use crossterm::event::{self, Event as CrosstermEvent, KeyEventKind};
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::Terminal;
@@ -238,7 +238,7 @@ impl App {
                             &self.data,
                             &self.ui.eject_filter,
                             &self.ui.search_filter,
-                            crate::tui::inline::eject::ReplayReason::Resize,
+                            crate::tui::inline::eject::ReplayReason::FilterChange,
                         );
                     }
                     if self.ui.pending_eject_cmd {

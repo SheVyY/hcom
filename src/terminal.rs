@@ -17,12 +17,9 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::paths;
-use crate::shared::constants::{
-    self, HCOM_IDENTITY_VARS, TERMINAL_ENV_MAP, TOOL_MARKER_VARS, get_terminal_preset,
-};
+use crate::shared::constants::{HCOM_IDENTITY_VARS, TOOL_MARKER_VARS};
 use crate::shared::platform;
-
-// ==================== Types ====================
+use crate::shared::terminal_presets::TERMINAL_ENV_MAP;
 
 /// Result of kill_process().
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,27 +50,89 @@ pub enum LaunchResult {
     Failed(String),
 }
 
-// ==================== macOS App Bundles ====================
-
 /// macOS app bundle fallback commands for cross-platform terminals.
 /// Used when CLI binary isn't in PATH but .app bundle is installed.
 const MACOS_APP_FALLBACKS: &[(&str, &str)] = &[
     ("kitty-window", "open -n -a kitty.app --args {script}"),
-    ("wezterm-window", "open -n -a WezTerm.app --args start -- bash {script}"),
-    ("alacritty", "open -n -a Alacritty.app --args -e bash {script}"),
+    (
+        "wezterm-window",
+        "open -n -a WezTerm.app --args start -- bash {script}",
+    ),
+    (
+        "alacritty",
+        "open -n -a Alacritty.app --args -e bash {script}",
+    ),
 ];
 
-/// Terminal context vars that should not leak to other terminal apps.
-const TERMINAL_CONTEXT_VARS: &[&str] = &["KITTY_WINDOW_ID", "WEZTERM_PANE"];
-
-// ==================== Detection Helpers ====================
+/// Terminal context vars stripped from the env before spawning a terminal launcher subprocess.
+/// Prevents outer terminal identity from leaking into newly-launched terminal panes.
+/// Must stay in sync with every env var read by detect_terminal_from_env().
+const TERMINAL_CONTEXT_VARS: &[&str] = &[
+    // Multiplexers
+    "CMUX_WORKSPACE_ID",
+    "CMUX_SURFACE_ID",
+    "TMUX_PANE",
+    "ZELLIJ_PANE_ID",
+    "ZELLIJ_SESSION_NAME",
+    // GPU/rich terminals
+    "KITTY_WINDOW_ID",
+    "KITTY_PID",
+    "KITTY_LISTEN_ON",
+    "WEZTERM_PANE",
+    "WAVETERM_BLOCKID",
+    // Bare terminal emulators
+    "GHOSTTY_RESOURCES_DIR",
+    "ITERM_SESSION_ID",
+    "ALACRITTY_WINDOW_ID",
+    "GNOME_TERMINAL_SCREEN",
+    "KONSOLE_DBUS_WINDOW",
+    "TERMINATOR_UUID",
+    "TILIX_ID",
+    "WT_SESSION",
+    // Generic terminal identity
+    "TERM_PROGRAM",
+    "TERM_SESSION_ID",
+    "COLORTERM",
+];
 
 /// Detect terminal preset from inherited environment variables.
 /// Used for same-terminal PTY launches (run_here=True) to enable close-on-kill.
+/// Checks built-in env map first, then TOML presets with pane_id_env defined.
 pub fn detect_terminal_from_env() -> Option<String> {
+    // Built-in mappings
     for &(env_var, preset_name) in TERMINAL_ENV_MAP {
-        if std::env::var(env_var).ok().filter(|v| !v.is_empty()).is_some() {
+        if std::env::var(env_var)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+        {
             return Some(preset_name.to_string());
+        }
+    }
+    // TOML-defined presets with pane_id_env
+    let toml_path = crate::paths::config_toml_path();
+    if let Some(presets_val) = crate::config::load_toml_presets(&toml_path) {
+        if let Some(table) = presets_val.as_table() {
+            for (name, val) in table {
+                if let Some(env_var) = val.get("pane_id_env").and_then(|v| v.as_str()) {
+                    if std::env::var(env_var)
+                        .ok()
+                        .filter(|v| !v.is_empty())
+                        .is_some()
+                    {
+                        return Some(name.clone());
+                    }
+                }
+            }
+        }
+    }
+    // TERM_PROGRAM value-based detection (terminals without a unique env var)
+    if let Ok(term_prog) = std::env::var("TERM_PROGRAM") {
+        match term_prog.as_str() {
+            "ghostty" => return Some("Ghostty".to_string()),
+            "iTerm.app" => return Some("iTerm".to_string()),
+            "Apple_Terminal" => return Some("Terminal.app".to_string()),
+            _ => {}
         }
     }
     None
@@ -102,6 +161,58 @@ fn find_macos_app(name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Replace `open -a <app>` app names with absolute `.app` bundle paths.
+///
+/// macOS `open -a Name` resolution is brittle on some systems even when the
+/// bundle exists. Rewriting to an absolute app path keeps all launch paths
+/// consistent for built-in presets and the platform-default Terminal.app path.
+fn rewrite_open_command_with_app_path(template: &str, app_path: &Path) -> Result<String> {
+    let mut parts = shell_split(template)?;
+    for idx in 0..parts.len().saturating_sub(1) {
+        let flag = &parts[idx];
+        let takes_app_arg = flag == "-a"
+            || (flag.starts_with('-')
+                && !flag.starts_with("--")
+                && flag.chars().skip(1).any(|c| c == 'a'));
+        if takes_app_arg {
+            if flag == "-a" {
+                parts.remove(idx);
+                parts[idx] = app_path.to_string_lossy().to_string();
+            } else {
+                let mut rewritten_flag = String::from("-");
+                for ch in flag.chars().skip(1) {
+                    if ch != 'a' {
+                        rewritten_flag.push(ch);
+                    }
+                }
+                if rewritten_flag == "-" {
+                    parts.remove(idx);
+                    parts[idx] = app_path.to_string_lossy().to_string();
+                } else {
+                    parts[idx] = rewritten_flag;
+                    parts[idx + 1] = app_path.to_string_lossy().to_string();
+                }
+            }
+            return Ok(parts
+                .iter()
+                .map(|p| shell_quote(p))
+                .collect::<Vec<_>>()
+                .join(" "));
+        }
+    }
+    Ok(template.to_string())
+}
+
+fn rewrite_macos_open_app_command(template: &str, app_name: &str) -> String {
+    if !cfg!(target_os = "macos") {
+        return template.to_string();
+    }
+    let Some(app_path) = find_macos_app(app_name) else {
+        return template.to_string();
+    };
+    rewrite_open_command_with_app_path(template, &app_path).unwrap_or_else(|_| template.to_string())
 }
 
 /// Find kitten binary — PATH first, then macOS app bundle.
@@ -188,14 +299,16 @@ pub fn which_bin(name: &str) -> Option<String> {
 /// Used on Termux to detect npm-installed tools that need `node <path>` rewrite.
 pub fn has_node_shebang(path: &str) -> bool {
     use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
     let mut buf = [0u8; 64];
-    let Ok(n) = f.read(&mut buf) else { return false };
+    let Ok(n) = f.read(&mut buf) else {
+        return false;
+    };
     let header = String::from_utf8_lossy(&buf[..n]);
     header.starts_with("#!") && header.contains("node")
 }
-
-// ==================== Preset Resolution ====================
 
 /// Resolve binary to full path via macOS app bundle fallback.
 fn resolve_binary_path(binary: &str, app_name: Option<&str>, preset_name: &str) -> Option<String> {
@@ -219,39 +332,39 @@ fn resolve_binary_path(binary: &str, app_name: Option<&str>, preset_name: &str) 
 /// On macOS, if CLI binary isn't in PATH but .app bundle exists,
 /// uses a hardcoded fallback or substitutes the full binary path.
 pub fn resolve_terminal_preset(preset_name: &str) -> Option<String> {
-    let preset = get_terminal_preset(preset_name)?;
-    let mut open_cmd = preset.open.to_string();
+    let merged = crate::config::get_merged_preset(preset_name)?;
+    let mut open_cmd = merged.open;
+    let app_name = merged.app_name.as_deref().unwrap_or(preset_name);
 
-    if let Some(binary) = preset.binary {
+    if let Some(ref binary) = merged.binary {
         if which_bin(binary).is_none() && cfg!(target_os = "macos") {
             // New-window presets have hardcoded fallbacks using `open -a`
             for &(name, fallback) in MACOS_APP_FALLBACKS {
                 if name == preset_name {
-                    let app_name = preset.app_name.unwrap_or(preset_name);
                     if find_macos_app(app_name).is_some() {
-                        return Some(fallback.to_string());
+                        return Some(rewrite_macos_open_app_command(fallback, app_name));
                     }
                 }
             }
             // Tab/split presets: substitute leading binary with full path
-            let app_name = preset.app_name.unwrap_or(preset_name);
             if let Some(full_path) = resolve_binary_path(binary, Some(app_name), preset_name) {
-                if open_cmd.starts_with(binary) {
+                if open_cmd.starts_with(binary.as_str()) {
                     open_cmd = format!("{}{}", full_path, &open_cmd[binary.len()..]);
                 }
             }
         }
     }
 
-    Some(open_cmd)
+    Some(rewrite_macos_open_app_command(&open_cmd, app_name))
 }
 
 /// Get terminal presets for current platform with availability status.
 pub fn get_available_presets() -> Vec<(String, bool)> {
     let mut result = vec![("default".to_string(), true)];
     let system = platform::platform_name();
+    let mut seen = std::collections::HashSet::new();
 
-    for (name, preset) in constants::TERMINAL_PRESETS.iter() {
+    for (name, preset) in crate::shared::terminal_presets::TERMINAL_PRESETS.iter() {
         if !preset.platforms.contains(&system) {
             continue;
         }
@@ -271,20 +384,39 @@ pub fn get_available_presets() -> Vec<(String, bool)> {
         };
 
         result.push((name.to_string(), available));
+        seen.insert(name.to_string());
+    }
+
+    // Add TOML-defined presets not already in built-ins
+    let toml_path = crate::paths::config_toml_path();
+    if let Some(presets_val) = crate::config::load_toml_presets(&toml_path) {
+        if let Some(table) = presets_val.as_table() {
+            for (name, preset_val) in table {
+                if seen.contains(name) {
+                    continue;
+                }
+                let available = preset_val
+                    .get("binary")
+                    .and_then(|v| v.as_str())
+                    .map(|b| which_bin(b).is_some())
+                    .unwrap_or(true);
+                result.push((name.clone(), available));
+            }
+        }
     }
 
     result.push(("custom".to_string(), true));
     result
 }
 
-// ==================== Environment Building ====================
-
 /// Build environment variable string for bash shells.
 pub fn build_env_string(env_vars: &HashMap<String, String>, format_type: &str) -> String {
     let mut valid: Vec<(&String, &String)> = env_vars
         .iter()
         .filter(|(k, _)| {
-            k.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            k.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
                 && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         })
         .collect();
@@ -320,8 +452,6 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-// ==================== Script Creation ====================
-
 /// Create a bash script for terminal launch.
 ///
 /// Scripts provide uniform execution across all platforms/terminals.
@@ -352,11 +482,7 @@ pub fn create_bash_script(
     let mut f = fs::File::create(script_file).context("Failed to create script file")?;
 
     writeln!(f, "#!/bin/bash")?;
-    writeln!(
-        f,
-        "printf \"\\033]0;hcom: starting {}...\\007\"",
-        tool_name
-    )?;
+    writeln!(f, "printf \"\\033]0;hcom: starting {}...\\007\"", tool_name)?;
     writeln!(f, "echo \"Starting {}...\"", tool_name)?;
 
     // Unset tool markers and identity vars to prevent inheritance
@@ -411,8 +537,8 @@ pub fn create_bash_script(
     if !tool_cmd.is_empty() {
         if let Some(tool_path) = which_bin(tool_cmd) {
             if platform::is_termux() && has_node_shebang(&tool_path) {
-                let node = which_bin("node")
-                    .unwrap_or_else(|| platform::TERMUX_NODE_PATH.to_string());
+                let node =
+                    which_bin("node").unwrap_or_else(|| platform::TERMUX_NODE_PATH.to_string());
                 final_command = final_command.replacen(
                     &format!("{} ", tool_cmd),
                     &format!("{} {} ", shell_quote(&node), shell_quote(&tool_path)),
@@ -431,7 +557,10 @@ pub fn create_bash_script(
     writeln!(f, "{}", final_command)?;
 
     if opens_new_window {
-        writeln!(f, "unset HCOM_PROCESS_ID HCOM_LAUNCHED HCOM_PTY_MODE HCOM_TAG HCOM_CODEX_SANDBOX_MODE")?;
+        writeln!(
+            f,
+            "unset HCOM_PROCESS_ID HCOM_LAUNCHED HCOM_PTY_MODE HCOM_TAG HCOM_CODEX_SANDBOX_MODE"
+        )?;
         writeln!(f, "rm -f {}", shell_quote(&script_file.to_string_lossy()))?;
         writeln!(f, "exec bash -l")?;
     } else if !background {
@@ -445,8 +574,6 @@ pub fn create_bash_script(
 
     Ok(())
 }
-
-// ==================== Terminal Launching ====================
 
 /// Build clean env for terminal launcher subprocesses.
 ///
@@ -551,13 +678,8 @@ fn shell_split(s: &str) -> Result<Vec<String>> {
 }
 
 /// Get macOS Terminal.app launch command.
-fn get_macos_terminal_argv() -> Vec<String> {
-    vec![
-        "open".to_string(),
-        "-a".to_string(),
-        "Terminal".to_string(),
-        "{script}".to_string(),
-    ]
+fn get_macos_terminal_command() -> String {
+    rewrite_macos_open_app_command("open -a Terminal {script}", "Terminal")
 }
 
 /// Get first available standard Linux terminal.
@@ -601,10 +723,7 @@ fn get_linux_terminal_argv() -> Option<Vec<String>> {
 /// Spawn terminal process, detached when inside AI tools.
 ///
 /// Returns (success, stdout_first_line) — stdout captured for {id} in close commands.
-fn spawn_terminal_process(
-    argv: &[String],
-    inside_ai_tool: bool,
-) -> Result<(bool, String)> {
+fn spawn_terminal_process(argv: &[String], inside_ai_tool: bool) -> Result<(bool, String)> {
     let launcher_env = get_launcher_env();
     let env_vec: Vec<(String, String)> = launcher_env.into_iter().collect();
 
@@ -623,7 +742,9 @@ fn spawn_terminal_process(
             .spawn()
             .context("Failed to spawn terminal process")?;
 
-        let output = child.wait_with_output().context("Failed to wait for terminal")?;
+        let output = child
+            .wait_with_output()
+            .context("Failed to wait for terminal")?;
 
         let captured = String::from_utf8_lossy(&output.stdout)
             .lines()
@@ -708,8 +829,7 @@ pub fn launch_terminal(
     let mut terminal_mode = terminal.unwrap_or("default").to_string();
 
     // Determine script extension
-    let use_command_ext =
-        !background && cfg!(target_os = "macos") && terminal_mode == "default";
+    let use_command_ext = !background && cfg!(target_os = "macos") && terminal_mode == "default";
     let extension = if use_command_ext { ".command" } else { ".sh" };
     let script_file = paths::hcom_path(&[
         paths::LAUNCH_DIR,
@@ -733,8 +853,22 @@ pub fn launch_terminal(
     let mut final_env = config_and_instance_env;
 
     if opens_new_window {
+        if terminal_mode == "default" {
+            if let Some(detected) = detect_terminal_from_env() {
+                terminal_mode = detected;
+            }
+        }
         if terminal_mode == "kitty" {
-            if std::env::var("KITTY_WINDOW_ID").ok().filter(|v| !v.is_empty()).is_some() {
+            if std::env::var("KITTY_WINDOW_ID")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .is_some()
+            {
+                // Inside kitty — use split, but still need socket for --to injection
+                kitty_socket = std::env::var("KITTY_LISTEN_ON")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(find_kitty_socket);
                 terminal_mode = "kitty-split".to_string();
             } else {
                 kitty_socket = find_kitty_socket();
@@ -745,7 +879,11 @@ pub fn launch_terminal(
                 };
             }
         } else if terminal_mode == "wezterm" {
-            if std::env::var("WEZTERM_PANE").ok().filter(|v| !v.is_empty()).is_some() {
+            if std::env::var("WEZTERM_PANE")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .is_some()
+            {
                 terminal_mode = "wezterm-split".to_string();
             } else if wezterm_reachable() {
                 terminal_mode = "wezterm-tab".to_string();
@@ -853,7 +991,7 @@ pub fn launch_terminal(
     // New window / custom command mode
     let custom_cmd: Option<String> = if terminal_mode == "default" {
         None
-    } else if get_terminal_preset(&terminal_mode).is_some() {
+    } else if crate::config::get_merged_preset(&terminal_mode).is_some() {
         // Known preset — check kitty remote control requirements
         if terminal_mode == "kitty-tab" || terminal_mode == "kitty-split" {
             let listen_on = std::env::var("KITTY_LISTEN_ON")
@@ -873,11 +1011,11 @@ pub fn launch_terminal(
         }
         let mut cmd = resolve_terminal_preset(&terminal_mode).unwrap_or_default();
         // Inject --to for kitty commands launched outside kitty
-        if !kitty_socket.is_empty()
-            && cmd.contains("kitten @")
-            && !cmd.contains("--to")
-        {
-            cmd = cmd.replace("kitten @", &format!("kitten @ --to {}", shell_quote(&kitty_socket)));
+        if !kitty_socket.is_empty() && cmd.contains("kitten @") && !cmd.contains("--to") {
+            cmd = cmd.replace(
+                "kitten @",
+                &format!("kitten @ --to {}", shell_quote(&kitty_socket)),
+            );
         }
         // Target launcher's tab for splits
         if terminal_mode == "kitty-tab" || terminal_mode == "kitty-split" {
@@ -913,11 +1051,20 @@ pub fn launch_terminal(
         // Platform default
         if platform::is_termux() {
             let am_argv = vec![
-                "am", "startservice", "--user", "0",
-                "-n", "com.termux/com.termux.app.RunCommandService",
-                "-a", "com.termux.RUN_COMMAND",
-                "--es", "com.termux.RUN_COMMAND_PATH", &script_str,
-                "--ez", "com.termux.RUN_COMMAND_BACKGROUND", "false",
+                "am",
+                "startservice",
+                "--user",
+                "0",
+                "-n",
+                "com.termux/com.termux.app.RunCommandService",
+                "-a",
+                "com.termux.RUN_COMMAND",
+                "--es",
+                "com.termux.RUN_COMMAND_PATH",
+                &script_str,
+                "--ez",
+                "com.termux.RUN_COMMAND_BACKGROUND",
+                "false",
             ];
             Command::new(am_argv[0])
                 .args(&am_argv[1..])
@@ -927,16 +1074,23 @@ pub fn launch_terminal(
         }
 
         let argv = match platform::platform_name() {
-            "Darwin" => get_macos_terminal_argv(),
+            "Darwin" => parse_terminal_command(
+                &get_macos_terminal_command(),
+                &script_str,
+                env.get("HCOM_PROCESS_ID").map(|s| s.as_str()).unwrap_or(""),
+            )?,
             "Linux" => get_linux_terminal_argv()
                 .ok_or_else(|| anyhow::anyhow!("No supported terminal emulator found"))?,
             other => bail!("Unsupported platform: {}", other),
         };
 
-        let final_argv: Vec<String> = argv
-            .iter()
-            .map(|a| a.replace("{script}", &script_str))
-            .collect();
+        let final_argv: Vec<String> = if platform::platform_name() == "Darwin" {
+            argv
+        } else {
+            argv.iter()
+                .map(|a| a.replace("{script}", &script_str))
+                .collect()
+        };
         let (success, captured_id) = spawn_terminal_process(&final_argv, inside_ai_tool)?;
         write_terminal_id(env, &captured_id);
         if success {
@@ -963,8 +1117,6 @@ fn build_full_env(config_env: &HashMap<String, String>) -> HashMap<String, Strin
     full
 }
 
-// ==================== Kill / Close ====================
-
 /// Close terminal pane via preset-specific command.
 ///
 /// Must run before SIGTERM because terminal CLIs match panes by PID/pane_id.
@@ -977,17 +1129,17 @@ pub fn close_terminal_pane(
     kitty_listen_on: &str,
     terminal_id: &str,
 ) -> bool {
-    let preset = match get_terminal_preset(preset_name) {
+    let merged = match crate::config::get_merged_preset(preset_name) {
         Some(p) => p,
         None => return false,
     };
 
-    let close_template = match preset.close {
-        Some(c) => c,
+    let close_template = match merged.close {
+        Some(ref c) => c.clone(),
         None => return false,
     };
 
-    let mut close_cmd = close_template.to_string();
+    let mut close_cmd = close_template;
 
     // Determine effective pane_id (fall back to terminal_id)
     let effective_pane_id = if pane_id.is_empty() && !terminal_id.is_empty() {
@@ -1013,12 +1165,21 @@ pub fn close_terminal_pane(
     close_cmd = close_cmd.replace("{id}", terminal_id);
 
     // Resolve binary path via app bundle fallback
-    if let Some(binary) = preset.binary {
-        let app_name = preset.app_name.unwrap_or(preset_name);
+    if let Some(ref binary) = merged.binary {
+        let app_name = merged.app_name.as_deref().unwrap_or(preset_name);
         if let Some(full_path) = resolve_binary_path(binary, Some(app_name), preset_name) {
-            if close_cmd.starts_with(binary) {
+            if close_cmd.starts_with(binary.as_str()) {
                 close_cmd = format!("{}{}", full_path, &close_cmd[binary.len()..]);
             }
+        }
+    }
+    if close_cmd.starts_with("kitten ") {
+        if let Some(full_path) = find_kitten_binary() {
+            close_cmd = format!(
+                "{}{}",
+                shell_quote(&full_path),
+                &close_cmd["kitten".len()..]
+            );
         }
     }
 
@@ -1055,7 +1216,14 @@ pub fn kill_process(
     terminal_id: &str,
 ) -> (KillResult, bool) {
     let pane_closed = if !preset_name.is_empty() {
-        close_terminal_pane(pid, preset_name, pane_id, process_id, kitty_listen_on, terminal_id)
+        close_terminal_pane(
+            pid,
+            preset_name,
+            pane_id,
+            process_id,
+            kitty_listen_on,
+            terminal_id,
+        )
     } else {
         false
     };
@@ -1074,8 +1242,6 @@ pub fn kill_process(
 
     (kill_result, pane_closed)
 }
-
-// ==================== Terminal Info Resolution ====================
 
 /// Resolve terminal info from a JSON launch_context string.
 ///
@@ -1111,16 +1277,13 @@ pub fn resolve_terminal_info_from_launch_context(launch_context_json: &str) -> T
             .get("kitty_listen_on")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .or_else(|| {
-                lc_env.and_then(|e| e.get("KITTY_LISTEN_ON").and_then(|v| v.as_str()))
-            })
+            .or_else(|| lc_env.and_then(|e| e.get("KITTY_LISTEN_ON").and_then(|v| v.as_str())))
             .unwrap_or("")
             .to_string();
     }
 
     // Infer preset when pane_id captured but not preset
-    if info.preset_name.is_empty() && !info.pane_id.is_empty() && !info.kitty_listen_on.is_empty()
-    {
+    if info.preset_name.is_empty() && !info.pane_id.is_empty() && !info.kitty_listen_on.is_empty() {
         info.preset_name = "kitty-split".to_string();
     }
 
@@ -1216,15 +1379,44 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_open_command_with_app_path() {
+        let rewritten = rewrite_open_command_with_app_path(
+            "open -a Terminal {script}",
+            Path::new("/System/Applications/Utilities/Terminal.app"),
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "open /System/Applications/Utilities/Terminal.app '{script}'"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_open_command_with_combined_flag() {
+        let rewritten = rewrite_open_command_with_app_path(
+            "open -na Ghostty.app --args -e bash {script}",
+            Path::new("/Applications/Ghostty.app"),
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "open -n /Applications/Ghostty.app --args -e bash '{script}'"
+        );
+    }
+
+    #[test]
     fn test_parse_terminal_command_missing_placeholder() {
         assert!(parse_terminal_command("open -a Terminal", "/tmp/test.sh", "").is_err());
     }
 
     #[test]
     fn test_parse_terminal_command_with_process_id() {
-        let argv =
-            parse_terminal_command("tmux split -t {process_id} -- {script}", "/tmp/test.sh", "abc-123")
-                .unwrap();
+        let argv = parse_terminal_command(
+            "tmux split -t {process_id} -- {script}",
+            "/tmp/test.sh",
+            "abc-123",
+        )
+        .unwrap();
         assert_eq!(
             argv,
             vec!["tmux", "split", "-t", "abc-123", "--", "/tmp/test.sh"]

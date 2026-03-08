@@ -1,10 +1,4 @@
 //! Shared hook infrastructure for all tools (Claude, Gemini, Codex, OpenCode).
-//!
-//! - Hook payload normalization (per-tool → unified `HookPayload`)
-//! - Hook result types (allow/block/error with structured output)
-//! - Shared functions: deliver, poll, bootstrap inject, identity init, finalize
-//!
-//! Tool-specific dispatchers (Phase 1B/1C/1D) call into these shared functions.
 
 pub mod claude;
 pub mod claude_args;
@@ -74,13 +68,11 @@ pub mod test_helpers {
 
 // Re-export key types.
 pub use common::{
-    deliver_pending_messages, find_last_bind_marker, finalize_session, get_pending_instances,
+    deliver_pending_messages, finalize_session, find_last_bind_marker, get_pending_instances,
     init_hook_context, inject_bootstrap_once, poll_messages, stop_instance,
 };
 pub use family::{bind_vanilla_instance, extract_tool_detail};
-pub use utils::{HookCategory, HookInfo, HOOK_REGISTRY};
-
-// ==================== Hook Payload ====================
+pub use utils::{HOOK_REGISTRY, HookCategory, HookInfo};
 
 /// Normalized hook payload — unified across all tools.
 ///
@@ -89,10 +81,10 @@ pub use utils::{HookCategory, HookInfo, HOOK_REGISTRY};
 ///
 #[derive(Debug, Clone)]
 pub struct HookPayload {
-    /// Claude/Gemini session ID, Codex thread ID.
-    pub session_id: String,
-    /// Path to tool's JSONL transcript (Claude) or conversation log.
-    pub transcript_path: String,
+    /// Claude/Gemini session ID, Codex thread ID. None if not provided.
+    pub session_id: Option<String>,
+    /// Path to tool's JSONL transcript (Claude) or conversation log. None if not provided.
+    pub transcript_path: Option<String>,
     /// Hook name (e.g., "Stop", "PostToolUse", "PreToolUse").
     pub hook_name: String,
     /// Tool type string ("claude", "gemini", "codex", "opencode").
@@ -104,29 +96,50 @@ pub struct HookPayload {
     /// Tool result/response (for AfterTool/PostToolUse hooks).
     pub tool_result: String,
     /// Notification type (for Notification hooks, e.g., "ToolPermission").
-    pub notification_type: String,
+    pub notification_type: Option<String>,
     /// Raw hook payload for tool-specific access.
     pub raw: Value,
 }
 
 impl HookPayload {
-    /// Return session_id as Option (None if empty).
-    pub fn session_id_opt(&self) -> Option<&str> {
-        if self.session_id.is_empty() { None } else { Some(&self.session_id) }
+    /// Extract a string from the first matching key, or empty string.
+    fn str_field(raw: &Value, keys: &[&str]) -> String {
+        for key in keys {
+            if let Some(s) = raw.get(*key).and_then(|v| v.as_str()) {
+                return s.to_string();
+            }
+        }
+        String::new()
     }
 
-    /// Return transcript_path as Option (None if empty).
-    pub fn transcript_path_opt(&self) -> Option<&str> {
-        if self.transcript_path.is_empty() { None } else { Some(&self.transcript_path) }
+    /// Extract an optional string from the first matching key.
+    fn opt_str_field(raw: &Value, keys: &[&str]) -> Option<String> {
+        for key in keys {
+            if let Some(s) = raw.get(*key).and_then(|v| v.as_str()) {
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract a value from the first matching key, or empty object.
+    fn obj_field(raw: &Value, keys: &[&str]) -> Value {
+        for key in keys {
+            if let Some(v) = raw.get(*key) {
+                return v.clone();
+            }
+        }
+        Value::Object(Default::default())
     }
 
     /// Build from Claude hook JSON.
     ///
     /// Claude hook stdin format (all keys at root level):
     ///   { "session_id", "transcript_path", "tool_name", "tool_input",
-    ///     "tool_response", "agent_id", "agent_type" }
-    pub fn from_claude(raw: &Value) -> Self {
-        // Tool result can be string or dict with stdout/stderr
+    ///     "tool_response", "notification_type", "agent_id", "agent_type" }
+    pub fn from_claude(raw: Value) -> Self {
         let tool_result = match raw.get("tool_response") {
             Some(Value::Object(obj)) => obj
                 .get("stdout")
@@ -138,35 +151,15 @@ impl HookPayload {
         };
 
         Self {
-            session_id: raw
-                .get("session_id")
-                .or_else(|| raw.get("sessionId"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            transcript_path: raw
-                .get("transcript_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            hook_name: raw
-                .get("hook_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            session_id: Self::opt_str_field(&raw, &["session_id", "sessionId"]),
+            transcript_path: Self::opt_str_field(&raw, &["transcript_path"]),
+            hook_name: Self::str_field(&raw, &["hook_name"]),
             tool: "claude".to_string(),
-            tool_name: raw
-                .get("tool_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            tool_input: raw
-                .get("tool_input")
-                .cloned()
-                .unwrap_or(Value::Object(Default::default())),
+            tool_name: Self::str_field(&raw, &["tool_name"]),
+            tool_input: Self::obj_field(&raw, &["tool_input"]),
             tool_result,
-            notification_type: String::new(),
-            raw: raw.clone(),
+            notification_type: Self::opt_str_field(&raw, &["notification_type"]),
+            raw,
         }
     }
 
@@ -176,63 +169,32 @@ impl HookPayload {
     ///   { "session_id"/"sessionId", "transcript_path"/"session_path",
     ///     "tool_name"/"toolName", "tool_input"/"toolInput",
     ///     "tool_response", "notification_type" }
-    pub fn from_gemini(raw: &Value) -> Self {
-        // Tool response format varies: dict with llmContent/output, or string
+    pub fn from_gemini(raw: Value) -> Self {
         let tool_result = match raw.get("tool_response") {
             Some(Value::Object(obj)) => obj
                 .get("llmContent")
                 .or_else(|| obj.get("output"))
-                .or_else(|| {
-                    obj.get("response")
-                        .and_then(|r| r.get("output"))
-                })
+                .or_else(|| obj.get("response").and_then(|r| r.get("output")))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            Some(v) => v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()),
+            Some(v) => v
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| v.to_string()),
             None => String::new(),
         };
 
-        // Gemini may use toolInput or tool_input
-        let tool_input = raw
-            .get("tool_input")
-            .or_else(|| raw.get("toolInput"))
-            .cloned()
-            .unwrap_or(Value::Object(Default::default()));
-
         Self {
-            session_id: raw
-                .get("session_id")
-                .or_else(|| raw.get("sessionId"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            transcript_path: raw
-                .get("transcript_path")
-                .or_else(|| raw.get("session_path"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            hook_name: raw
-                .get("hook_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            session_id: Self::opt_str_field(&raw, &["session_id", "sessionId"]),
+            transcript_path: Self::opt_str_field(&raw, &["transcript_path", "session_path"]),
+            hook_name: Self::str_field(&raw, &["hook_name"]),
             tool: "gemini".to_string(),
-            tool_name: raw
-                .get("tool_name")
-                .or_else(|| raw.get("toolName"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            tool_input,
+            tool_name: Self::str_field(&raw, &["tool_name", "toolName"]),
+            tool_input: Self::obj_field(&raw, &["tool_input", "toolInput"]),
             tool_result,
-            notification_type: raw
-                .get("notification_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            raw: raw.clone(),
+            notification_type: Self::opt_str_field(&raw, &["notification_type"]),
+            raw,
         }
     }
 
@@ -242,73 +204,37 @@ impl HookPayload {
     ///   { "type": "agent-turn-complete", "thread-id": "uuid",
     ///     "turn-id", "cwd", "input-messages", "last-assistant-message" }
     /// Note: Codex has no tool_name/tool_input — only event_type.
-    pub fn from_codex(raw: &Value) -> Self {
-        let thread_id = raw
-            .get("thread-id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
+    pub fn from_codex(raw: Value) -> Self {
         Self {
-            session_id: thread_id,
-            transcript_path: raw
-                .get("transcript_path")
-                .or_else(|| raw.get("session_path"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            hook_name: raw
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            session_id: Self::opt_str_field(&raw, &["thread-id"]),
+            transcript_path: Self::opt_str_field(&raw, &["transcript_path", "session_path"]),
+            hook_name: Self::str_field(&raw, &["type"]),
             tool: "codex".to_string(),
             tool_name: String::new(),
             tool_input: Value::Object(Default::default()),
             tool_result: String::new(),
-            notification_type: String::new(),
-            raw: raw.clone(),
+            notification_type: None,
+            raw,
         }
     }
 
     /// Build from OpenCode hook JSON.
     ///
     /// OpenCode hooks: session_id from env, minimal tool info.
-    pub fn from_opencode(raw: &Value) -> Self {
+    pub fn from_opencode(raw: Value) -> Self {
         Self {
-            session_id: raw
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            transcript_path: raw
-                .get("transcript_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            hook_name: raw
-                .get("hook_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            session_id: Self::opt_str_field(&raw, &["session_id"]),
+            transcript_path: Self::opt_str_field(&raw, &["transcript_path"]),
+            hook_name: Self::str_field(&raw, &["hook_name"]),
             tool: "opencode".to_string(),
-            tool_name: raw
-                .get("tool_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            tool_input: raw
-                .get("tool_input")
-                .cloned()
-                .unwrap_or(Value::Object(Default::default())),
+            tool_name: Self::str_field(&raw, &["tool_name"]),
+            tool_input: Self::obj_field(&raw, &["tool_input"]),
             tool_result: String::new(),
-            notification_type: String::new(),
-            raw: raw.clone(),
+            notification_type: None,
+            raw,
         }
     }
 }
-
-// ==================== Hook Result ====================
 
 /// Hook handler result — determines exit code and stdout output.
 ///
@@ -347,7 +273,6 @@ impl HookResult {
             HookResult::UpdateInput { .. } => 0,
         }
     }
-
 }
 
 #[cfg(test)]
@@ -364,12 +289,16 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": {"command": "ls"}
         });
-        let payload = HookPayload::from_claude(&raw);
-        assert_eq!(payload.session_id, "sess-123");
-        assert_eq!(payload.transcript_path, "/tmp/transcript.jsonl");
+        let payload = HookPayload::from_claude(raw);
+        assert_eq!(payload.session_id.as_deref(), Some("sess-123"));
+        assert_eq!(
+            payload.transcript_path.as_deref(),
+            Some("/tmp/transcript.jsonl")
+        );
         assert_eq!(payload.hook_name, "PostToolUse");
         assert_eq!(payload.tool, "claude");
         assert_eq!(payload.tool_name, "Bash");
+        assert_eq!(payload.notification_type, None);
     }
 
     #[test]
@@ -381,8 +310,8 @@ mod tests {
             "tool_name": "run_shell_command",
             "tool_input": {"command": "echo hi"}
         });
-        let payload = HookPayload::from_gemini(&raw);
-        assert_eq!(payload.session_id, "gem-456");
+        let payload = HookPayload::from_gemini(raw);
+        assert_eq!(payload.session_id.as_deref(), Some("gem-456"));
         assert_eq!(payload.tool, "gemini");
         assert_eq!(payload.tool_name, "run_shell_command");
         assert_eq!(payload.tool_input["command"], "echo hi");
@@ -396,8 +325,8 @@ mod tests {
             "type": "agent-turn-complete",
             "cwd": "/tmp/project"
         });
-        let payload = HookPayload::from_codex(&raw);
-        assert_eq!(payload.session_id, "thread-789");
+        let payload = HookPayload::from_codex(raw);
+        assert_eq!(payload.session_id.as_deref(), Some("thread-789"));
         assert_eq!(payload.tool, "codex");
         assert_eq!(payload.hook_name, "agent-turn-complete");
         assert_eq!(payload.tool_name, "");
@@ -411,8 +340,8 @@ mod tests {
             "tool_name": "bash",
             "tool_input": {"command": "pwd"}
         });
-        let payload = HookPayload::from_opencode(&raw);
-        assert_eq!(payload.session_id, "oc-111");
+        let payload = HookPayload::from_opencode(raw);
+        assert_eq!(payload.session_id.as_deref(), Some("oc-111"));
         assert_eq!(payload.tool, "opencode");
         assert_eq!(payload.tool_name, "bash");
     }
@@ -420,9 +349,9 @@ mod tests {
     #[test]
     fn test_hook_payload_missing_fields() {
         let raw = serde_json::json!({});
-        let payload = HookPayload::from_claude(&raw);
-        assert_eq!(payload.session_id, "");
-        assert_eq!(payload.transcript_path, "");
+        let payload = HookPayload::from_claude(raw);
+        assert_eq!(payload.session_id, None);
+        assert_eq!(payload.transcript_path, None);
         assert_eq!(payload.tool_name, "");
     }
 
@@ -434,9 +363,12 @@ mod tests {
             "session_path": "/tmp/gemini/chat.json",
             "hook_name": "BeforeAgent"
         });
-        let payload = HookPayload::from_gemini(&raw);
-        assert_eq!(payload.session_id, "gem-camel");
-        assert_eq!(payload.transcript_path, "/tmp/gemini/chat.json");
+        let payload = HookPayload::from_gemini(raw);
+        assert_eq!(payload.session_id.as_deref(), Some("gem-camel"));
+        assert_eq!(
+            payload.transcript_path.as_deref(),
+            Some("/tmp/gemini/chat.json")
+        );
     }
 
     #[test]
@@ -446,8 +378,23 @@ mod tests {
             "session_id": "gem-1",
             "tool_response": "plain text output"
         });
-        let payload = HookPayload::from_gemini(&raw);
+        let payload = HookPayload::from_gemini(raw);
         assert_eq!(payload.tool_result, "plain text output");
+    }
+
+    #[test]
+    fn test_hook_payload_from_claude_notification_type() {
+        let raw = serde_json::json!({
+            "session_id": "claude-1",
+            "hook_name": "Notification",
+            "notification_type": "permission_prompt",
+            "message": "Claude needs your permission to use Bash"
+        });
+        let payload = HookPayload::from_claude(raw);
+        assert_eq!(
+            payload.notification_type.as_deref(),
+            Some("permission_prompt")
+        );
     }
 
     #[test]
@@ -458,7 +405,10 @@ mod tests {
         };
         assert_eq!(result.exit_code(), 0);
         match &result {
-            HookResult::Allow { additional_context, system_message } => {
+            HookResult::Allow {
+                additional_context,
+                system_message,
+            } => {
                 assert_eq!(additional_context.as_deref(), Some("bootstrap text"));
                 assert!(system_message.is_none());
             }
@@ -474,7 +424,10 @@ mod tests {
         };
         assert_eq!(result.exit_code(), 0);
         match &result {
-            HookResult::Allow { additional_context, system_message } => {
+            HookResult::Allow {
+                additional_context,
+                system_message,
+            } => {
                 assert!(additional_context.is_none());
                 assert!(system_message.is_none());
             }

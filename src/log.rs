@@ -1,14 +1,4 @@
-//! Structured JSONL logging for hcom with hand-rolled rotation.
-//!
-//! Logs to ~/.hcom/.tmp/logs/hcom.log.
-//! JSONL format:
-//! - ISO 8601 timestamps (not Unix epoch)
-//! - "subsystem" field (not "component")
-//! - Additional structured fields (instance, session_id, tool, etc.)
-//!
-//! Rotation: check size ≤8MB, rename .log→.log.1→.log.2→.log.3, delete .log.3.
-//! No `tracing` — each hcom invocation is <50ms, tracing adds complexity with no benefit.
-//! Concurrent writers use file-append atomicity (≤4KB writes on APFS).
+//! Structured JSONL logging with size-based rotation (~8MB, 3 backups).
 
 use crate::config::Config;
 use chrono::Utc;
@@ -54,7 +44,10 @@ fn rotate_if_needed(path: &std::path::Path) {
         if i == backups {
             let _ = fs::remove_file(&older);
         } else if older.exists() {
-            let _ = fs::rename(&older, path.with_file_name(format!("{}.{}", LOG_FILE, i + 1)));
+            let _ = fs::rename(
+                &older,
+                path.with_file_name(format!("{}.{}", LOG_FILE, i + 1)),
+            );
         }
     }
     // Current -> .1
@@ -108,10 +101,7 @@ pub fn log_with_fields(
     obj.insert("event".into(), serde_json::Value::String(event.into()));
 
     if !instance.is_empty() {
-        obj.insert(
-            "instance".into(),
-            serde_json::Value::String(instance),
-        );
+        obj.insert("instance".into(), serde_json::Value::String(instance));
     }
 
     if !message.is_empty() {
@@ -155,10 +145,13 @@ pub fn log_error(subsystem: &str, event: &str, message: &str) {
     // Split "ErrorType: message" into structured fields
     if let Some((error_type, error_msg)) = message.split_once(": ") {
         if !error_type.contains(' ') {
-            log_with_fields("ERROR", subsystem, event, message, &[
-                ("error_type", error_type),
-                ("error_msg", error_msg),
-            ]);
+            log_with_fields(
+                "ERROR",
+                subsystem,
+                event,
+                message,
+                &[("error_type", error_type), ("error_msg", error_msg)],
+            );
             return;
         }
     }
@@ -383,9 +376,18 @@ mod tests {
         // Write some test log entries
         let ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let entries = vec![
-            format!(r#"{{"ts":"{}","level":"ERROR","subsystem":"test","event":"e1","msg":"err"}}"#, ts),
-            format!(r#"{{"ts":"{}","level":"WARN","subsystem":"test","event":"e2","msg":"warn"}}"#, ts),
-            format!(r#"{{"ts":"{}","level":"INFO","subsystem":"test","event":"e3","msg":"info"}}"#, ts),
+            format!(
+                r#"{{"ts":"{}","level":"ERROR","subsystem":"test","event":"e1","msg":"err"}}"#,
+                ts
+            ),
+            format!(
+                r#"{{"ts":"{}","level":"WARN","subsystem":"test","event":"e2","msg":"warn"}}"#,
+                ts
+            ),
+            format!(
+                r#"{{"ts":"{}","level":"INFO","subsystem":"test","event":"e3","msg":"info"}}"#,
+                ts
+            ),
         ];
         fs::write(&path, entries.join("\n") + "\n").unwrap();
 

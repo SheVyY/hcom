@@ -9,14 +9,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 
-static RE_TAG: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9-]+$").unwrap());
-static RE_PRESET_NAME: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_]+$").unwrap());
+static RE_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9-]+$").unwrap());
+static RE_PRESET_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_]+$").unwrap());
 
 use crate::paths;
-
-// ==================== Runtime Config (existing) ====================
 
 /// Global configuration instance, lazily initialized and resettable for tests.
 static CONFIG: Mutex<Option<Config>> = Mutex::new(None);
@@ -66,31 +62,9 @@ impl Config {
     fn from_env() -> Self {
         use std::env;
 
-        let hcom_dir = if let Ok(dir) = env::var("HCOM_DIR") {
-            // Expand ~ and resolve to absolute path
-            let expanded = if dir.starts_with('~') {
-                if let Ok(home) = env::var("HOME") {
-                    dir.replacen('~', &home, 1)
-                } else {
-                    dir
-                }
-            } else {
-                dir
-            };
-            // Resolve relative paths to absolute
-            let path = PathBuf::from(&expanded);
-            if path.is_relative() {
-                env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join(path)
-            } else {
-                path
-            }
-        } else if let Ok(home) = env::var("HOME") {
-            PathBuf::from(home).join(".hcom")
-        } else {
-            PathBuf::from(".hcom")
-        };
+        let env_map: HashMap<String, String> = env::vars().collect();
+        let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let (hcom_dir, _) = paths::resolve_hcom_dir_from_env(&env_map, &cwd);
 
         let instance_name = env::var("HCOM_INSTANCE_NAME")
             .ok()
@@ -105,8 +79,6 @@ impl Config {
         }
     }
 }
-
-// ==================== TOML Key Mapping ====================
 
 /// Bidirectional mapping: HcomConfig field name <-> TOML dotted path.
 const TOML_KEY_MAP: &[(&str, &str)] = &[
@@ -162,33 +134,7 @@ const RELAY_FIELDS: &[&str] = &["relay", "relay_id", "relay_token", "relay_enabl
 /// Characters that are dangerous in terminal preset values (injection risk).
 const TERMINAL_DANGEROUS_CHARS: &[char] = &['`', '$', ';', '|', '&', '\n', '\r'];
 
-/// Built-in terminal preset names (from shared.py TERMINAL_PRESETS).
-/// Used for validation and case normalization.
-const BUILTIN_TERMINAL_PRESETS: &[&str] = &[
-    "Terminal.app",
-    "iTerm",
-    "Ghostty",
-    "kitty",
-    "kitty-window",
-    "kitty-tab",
-    "kitty-split",
-    "wezterm",
-    "wezterm-window",
-    "wezterm-tab",
-    "wezterm-split",
-    "alacritty",
-    "ttab",
-    "wttab",
-    "gnome-terminal",
-    "konsole",
-    "xterm",
-    "tilix",
-    "terminator",
-    "Windows Terminal",
-    "mintty",
-    "tmux",
-    "tmux-split",
-];
+use crate::shared::terminal_presets::TERMINAL_PRESETS;
 
 /// Valid codex sandbox modes.
 const VALID_SANDBOX_MODES: &[&str] = &["workspace", "untrusted", "danger-full-access", "none"];
@@ -199,8 +145,6 @@ const TOML_HEADER: &str = "\
 # Help: hcom config --help
 # Docs: hcom run docs
 ";
-
-// ==================== TOML Helpers ====================
 
 /// Get value from nested TOML table using dotted path (e.g., "launch.claude.args").
 fn get_nested(table: &toml::Value, dotted_path: &str) -> Option<toml::Value> {
@@ -216,19 +160,21 @@ fn set_nested(table: &mut toml::Value, dotted_path: &str, value: toml::Value) {
     let parts: Vec<&str> = dotted_path.split('.').collect();
     let mut current = table;
     for &part in &parts[..parts.len() - 1] {
-        let Some(tbl) = current.as_table_mut() else { return };
+        let Some(tbl) = current.as_table_mut() else {
+            return;
+        };
         if !tbl.contains_key(part) {
             tbl.insert(part.to_string(), toml::Value::Table(toml::map::Map::new()));
         }
-        let Some(next) = tbl.get_mut(part) else { return };
+        let Some(next) = tbl.get_mut(part) else {
+            return;
+        };
         current = next;
     }
     if let Some(t) = current.as_table_mut() {
         t.insert(parts[parts.len() - 1].to_string(), value);
     }
 }
-
-// ==================== Config Error ====================
 
 /// Validation errors from HcomConfig construction.
 #[derive(Debug, Clone)]
@@ -251,8 +197,6 @@ impl std::fmt::Display for HcomConfigError {
 }
 
 impl std::error::Error for HcomConfigError {}
-
-// ==================== HcomConfig ====================
 
 /// HCOM user configuration with validation.
 /// Load priority: env var → config.toml → defaults.
@@ -347,13 +291,11 @@ impl HcomConfig {
         // Validate terminal
         if self.terminal.is_empty() {
             errors.insert("terminal".into(), "terminal cannot be empty".into());
-        } else if self.terminal != "default"
-            && self.terminal != "print"
-            && self.terminal != "here"
+        } else if self.terminal != "default" && self.terminal != "print" && self.terminal != "here"
         {
             // Check against built-in presets + user-defined TOML presets
-            let known = is_known_terminal_preset(&self.terminal)
-                || is_user_defined_preset(&self.terminal);
+            let known =
+                is_known_terminal_preset(&self.terminal) || is_user_defined_preset(&self.terminal);
             if !known {
                 // Not a known preset — must be a custom command with {script}
                 if !self.terminal.contains("{script}") {
@@ -369,13 +311,12 @@ impl HcomConfig {
         }
 
         // Validate tag (alphanumeric + hyphens only)
-        if !self.tag.is_empty()
-            && !RE_TAG.is_match(&self.tag) {
-                errors.insert(
-                    "tag".into(),
-                    "tag can only contain letters, numbers, and hyphens".into(),
-                );
-            }
+        if !self.tag.is_empty() && !RE_TAG.is_match(&self.tag) {
+            errors.insert(
+                "tag".into(),
+                "tag can only contain letters, numbers, and hyphens".into(),
+            );
+        }
 
         // Validate shell-quoted args fields
         for (field, value) in [
@@ -497,8 +438,6 @@ impl HcomConfig {
         Ok(())
     }
 
-    // ==================== Load from TOML + env ====================
-
     /// Load config with precedence: env var → config.toml → defaults.
     ///
     /// `env_override`: If Some, use this map for env var lookups instead of std::env.
@@ -536,8 +475,7 @@ impl HcomConfig {
     ) -> Result<Self, HcomConfigError> {
         let mut config = HcomConfig::default();
 
-        let is_relay_field =
-            |field: &str| -> bool { RELAY_FIELDS.contains(&field) };
+        let is_relay_field = |field: &str| -> bool { RELAY_FIELDS.contains(&field) };
 
         // Helper: get value with precedence env → file
         let get_var = |field: &str| -> Option<TomlFieldValue> {
@@ -614,12 +552,10 @@ impl HcomConfig {
             if let Some(val) = get_var(bool_field) {
                 match val {
                     TomlFieldValue::Bool(b) => {
-                        let _ =
-                            config.set_field(bool_field, if b { "1" } else { "0" });
+                        let _ = config.set_field(bool_field, if b { "1" } else { "0" });
                     }
                     TomlFieldValue::Str(s) => {
-                        let _ = config
-                            .set_field(bool_field, if is_falsy(&s) { "0" } else { "1" });
+                        let _ = config.set_field(bool_field, if is_falsy(&s) { "0" } else { "1" });
                     }
                     _ => {}
                 }
@@ -642,8 +578,6 @@ impl HcomConfig {
         Ok(config)
     }
 
-    // ==================== Conversion to/from HCOM_* dict ====================
-
     /// Convert to HCOM_* env var dict (for persistence/display).
     pub fn to_env_dict(&self) -> HashMap<String, String> {
         let mut map = HashMap::new();
@@ -661,8 +595,7 @@ impl HcomConfig {
         let mut errors: HashMap<String, String> = HashMap::new();
 
         // Build reverse map: HCOM_* key -> field name
-        let env_to_field: HashMap<&str, &str> =
-            FIELD_TO_ENV.iter().map(|&(f, e)| (e, f)).collect();
+        let env_to_field: HashMap<&str, &str> = FIELD_TO_ENV.iter().map(|&(f, e)| (e, f)).collect();
 
         for (env_key, value) in data {
             if let Some(&field) = env_to_field.get(env_key.as_str()) {
@@ -695,12 +628,8 @@ impl HcomConfig {
                 // Determine TOML value type from the default structure
                 let default_val = get_nested(&table, toml_path);
                 let toml_val = match default_val {
-                    Some(toml::Value::Boolean(_)) => {
-                        toml::Value::Boolean(!is_falsy(&val))
-                    }
-                    Some(toml::Value::Integer(_)) => {
-                        toml::Value::Integer(val.parse().unwrap_or(0))
-                    }
+                    Some(toml::Value::Boolean(_)) => toml::Value::Boolean(!is_falsy(&val)),
+                    Some(toml::Value::Integer(_)) => toml::Value::Integer(val.parse().unwrap_or(0)),
                     _ => toml::Value::String(val),
                 };
                 set_nested(&mut table, toml_path, toml_val);
@@ -709,8 +638,6 @@ impl HcomConfig {
         table
     }
 }
-
-// ==================== TOML I/O ====================
 
 /// Typed value from TOML parsing (preserves original type for coercion).
 #[derive(Clone, Debug)]
@@ -795,10 +722,7 @@ pub fn load_toml_config(path: &std::path::Path) -> HashMap<String, TomlFieldValu
 /// Write config.toml from HcomConfig using toml_edit to preserve comments and formatting.
 /// If the file already exists, parses it and surgically updates only changed keys.
 /// If the file doesn't exist, writes a fresh default with the header comment.
-pub fn save_toml_config(
-    config: &HcomConfig,
-    presets: Option<&toml::Value>,
-) -> std::io::Result<()> {
+pub fn save_toml_config(config: &HcomConfig, presets: Option<&toml::Value>) -> std::io::Result<()> {
     use toml_edit::DocumentMut;
 
     let toml_path = paths::config_toml_path();
@@ -811,9 +735,9 @@ pub fn save_toml_config(
     // Load existing document or create fresh one with header
     let mut doc: DocumentMut = if toml_path.exists() {
         let existing = std::fs::read_to_string(&toml_path)?;
-        existing.parse::<DocumentMut>().unwrap_or_else(|_| {
-            format!("{TOML_HEADER}\n").parse::<DocumentMut>().unwrap()
-        })
+        existing
+            .parse::<DocumentMut>()
+            .unwrap_or_else(|_| format!("{TOML_HEADER}\n").parse::<DocumentMut>().unwrap())
     } else {
         format!("{TOML_HEADER}\n").parse::<DocumentMut>().unwrap()
     };
@@ -830,7 +754,9 @@ pub fn save_toml_config(
         // Convert toml::Value presets to toml_edit items
         if let Some(presets_table) = presets_val.as_table() {
             ensure_edit_table(&mut doc, "terminal");
-            let Some(terminal) = doc["terminal"].as_table_mut() else { return Ok(()); };
+            let Some(terminal) = doc["terminal"].as_table_mut() else {
+                return Ok(());
+            };
             // Parse via a wrapper doc so we get a proper nested table, not a document root
             let wrapper_str = format!(
                 "[presets]\n{}",
@@ -838,7 +764,11 @@ pub fn save_toml_config(
                     .unwrap_or_default()
             );
             if let Ok(wrapper_doc) = wrapper_str.parse::<DocumentMut>() {
-                if let Some(item) = wrapper_doc.as_item().as_table().and_then(|t| t.get("presets")) {
+                if let Some(item) = wrapper_doc
+                    .as_item()
+                    .as_table()
+                    .and_then(|t| t.get("presets"))
+                {
                     terminal.insert("presets", item.clone());
                 }
             }
@@ -859,9 +789,9 @@ fn set_nested_edit(doc: &mut toml_edit::DocumentMut, dotted_path: &str, value: &
     // Convert string value to the correct toml_edit type
     let edit_value: toml_edit::Value = match default_val {
         Some(toml::Value::Boolean(_)) => toml_edit::value(!is_falsy(value)).into_value().unwrap(),
-        Some(toml::Value::Integer(_)) => {
-            toml_edit::value(value.parse::<i64>().unwrap_or(0)).into_value().unwrap()
-        }
+        Some(toml::Value::Integer(_)) => toml_edit::value(value.parse::<i64>().unwrap_or(0))
+            .into_value()
+            .unwrap(),
         _ => toml_edit::value(value).into_value().unwrap(),
     };
 
@@ -876,7 +806,9 @@ fn set_nested_edit(doc: &mut toml_edit::DocumentMut, dotted_path: &str, value: &
         }
         3 => {
             ensure_edit_table(doc, parts[0]);
-            let Some(t) = doc[parts[0]].as_table_mut() else { return };
+            let Some(t) = doc[parts[0]].as_table_mut() else {
+                return;
+            };
             if t.get(parts[1]).is_none() || !t[parts[1]].is_table() {
                 t.insert(parts[1], toml_edit::Item::Table(toml_edit::Table::new()));
             }
@@ -905,8 +837,6 @@ pub fn load_toml_presets(path: &std::path::Path) -> Option<toml::Value> {
         None
     }
 }
-
-// ==================== Default TOML Structure ====================
 
 /// Build the canonical default TOML structure
 fn default_toml_structure() -> toml::Value {
@@ -949,8 +879,6 @@ name_export = ""
     toml::Value::Table(toml_str.parse::<toml::Table>().unwrap())
 }
 
-// ==================== Env Var Helpers ====================
-
 /// Check if a string value is falsy
 /// Check if a terminal name matches a known built-in preset (case-insensitive).
 /// Public alias for use by status command.
@@ -959,17 +887,16 @@ pub fn is_known_terminal_preset_pub(name: &str) -> bool {
 }
 
 /// Check if a terminal name matches a known built-in preset (case-insensitive).
-/// If matched, returns true. Use `normalize_terminal_case` to get the canonical name.
 fn is_known_terminal_preset(name: &str) -> bool {
-    BUILTIN_TERMINAL_PRESETS
+    TERMINAL_PRESETS
         .iter()
-        .any(|p| p.eq_ignore_ascii_case(name))
+        .any(|(p, _)| p.eq_ignore_ascii_case(name))
 }
 
 /// Resolve old casing to canonical preset name (e.g., "WezTerm" → "wezterm").
 /// Returns the canonical name if matched, otherwise returns the input unchanged.
 fn normalize_terminal_case(name: &str) -> String {
-    for &preset in BUILTIN_TERMINAL_PRESETS {
+    for &(preset, _) in TERMINAL_PRESETS.iter() {
         if preset.eq_ignore_ascii_case(name) {
             return preset.to_string();
         }
@@ -978,7 +905,7 @@ fn normalize_terminal_case(name: &str) -> String {
 }
 
 /// Check if a terminal name matches a user-defined preset in config.toml.
-fn is_user_defined_preset(name: &str) -> bool {
+pub fn is_user_defined_preset(name: &str) -> bool {
     let toml_path = paths::config_toml_path();
     if let Some(presets_val) = load_toml_presets(&toml_path) {
         if let Some(table) = presets_val.as_table() {
@@ -989,35 +916,105 @@ fn is_user_defined_preset(name: &str) -> bool {
 }
 
 /// Get the pane_id_env for a preset, checking TOML overrides then built-in defaults.
-///
-/// TOML presets can define `pane_id_env` to specify which env var holds the pane ID.
-/// If not in TOML, falls back to the built-in preset's `pane_id_env`.
-///
 pub fn get_merged_preset_pane_id_env(name: &str) -> Option<String> {
-    // Check TOML first — user may define pane_id_env for custom presets
+    get_merged_preset(name).and_then(|p| p.pane_id_env)
+}
+
+/// Get a fully merged terminal preset: TOML overrides on top of built-in defaults.
+///
+/// Returns None if the name matches neither a TOML preset nor a built-in preset.
+pub fn get_merged_preset(name: &str) -> Option<MergedPreset> {
     let toml_path = paths::config_toml_path();
-    if let Some(presets_val) = load_toml_presets(&toml_path) {
-        if let Some(table) = presets_val.as_table() {
-            if let Some(preset) = table.get(name).or_else(|| {
-                table.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v)
-            }) {
-                if let Some(env_var) = preset.get("pane_id_env").and_then(|v| v.as_str()) {
-                    return Some(env_var.to_string());
-                }
-            }
+    let toml_preset = load_toml_presets(&toml_path).and_then(|presets| {
+        let table = presets.as_table()?;
+        let val = table
+            .get(name)
+            .or_else(|| {
+                table
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .map(|(_, v)| v)
+            })?
+            .as_table()?;
+        Some(TomlPresetFields {
+            binary: val
+                .get("binary")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            app_name: val
+                .get("app_name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            open: val
+                .get("open")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            close: val
+                .get("close")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            pane_id_env: val
+                .get("pane_id_env")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        })
+    });
+
+    let builtin = crate::shared::get_terminal_preset(name);
+
+    match (&toml_preset, &builtin) {
+        (None, None) => None,
+        _ => {
+            let b_open = builtin.map(|b| b.open).unwrap_or("");
+            let b_close = builtin.and_then(|b| b.close);
+            let b_binary = builtin.and_then(|b| b.binary);
+            let b_app = builtin.and_then(|b| b.app_name);
+            let b_pane_env = builtin.and_then(|b| b.pane_id_env);
+
+            let t = toml_preset.as_ref();
+            Some(MergedPreset {
+                open: t
+                    .and_then(|t| t.open.clone())
+                    .unwrap_or_else(|| b_open.to_string()),
+                close: t
+                    .and_then(|t| t.close.clone())
+                    .or_else(|| b_close.map(|s| s.to_string())),
+                binary: t
+                    .and_then(|t| t.binary.clone())
+                    .or_else(|| b_binary.map(|s| s.to_string())),
+                app_name: t
+                    .and_then(|t| t.app_name.clone())
+                    .or_else(|| b_app.map(|s| s.to_string())),
+                pane_id_env: t
+                    .and_then(|t| t.pane_id_env.clone())
+                    .or_else(|| b_pane_env.map(|s| s.to_string())),
+            })
         }
     }
-    // Fall back to built-in preset
-    crate::shared::get_terminal_preset(name)
-        .and_then(|p| p.pane_id_env)
-        .map(|s| s.to_string())
+}
+
+/// Parsed TOML preset fields (all optional — overlay on built-in).
+struct TomlPresetFields {
+    binary: Option<String>,
+    app_name: Option<String>,
+    open: Option<String>,
+    close: Option<String>,
+    pane_id_env: Option<String>,
+}
+
+/// Fully merged terminal preset (TOML + built-in).
+#[derive(Debug, Clone)]
+pub struct MergedPreset {
+    pub open: String,
+    pub close: Option<String>,
+    pub binary: Option<String>,
+    pub app_name: Option<String>,
+    pub pane_id_env: Option<String>,
 }
 
 fn is_falsy(s: &str) -> bool {
     matches!(s, "0" | "false" | "False" | "no" | "off" | "")
 }
-
-// ==================== Config Snapshot ====================
 
 /// Structured snapshot of config state for load/save operations.
 #[derive(Clone, Debug)]
@@ -1062,8 +1059,6 @@ pub fn write_default_config() -> std::io::Result<()> {
     save_toml_config(&config, None)?;
     save_env_file(&HashMap::new())
 }
-
-// ==================== Env File I/O ====================
 
 const ENV_HEADER: &str = "# Env vars passed through to agents (e.g. ANTHROPIC_MODEL=...)\n";
 const DEFAULT_ENV_VARS: &[&str] = &[
@@ -1182,8 +1177,6 @@ fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     crate::paths::atomic_write_io(path, content)
 }
 
-// ==================== Tests ====================
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1225,8 +1218,6 @@ mod tests {
             }
         }
     }
-
-    // ==================== Config (runtime) tests ====================
 
     #[test]
     #[serial]
@@ -1349,8 +1340,6 @@ mod tests {
         });
     }
 
-    // ==================== HcomConfig tests ====================
-
     #[test]
     fn test_hcom_config_defaults() {
         let mut config = HcomConfig::default();
@@ -1468,7 +1457,14 @@ mod tests {
     #[test]
     fn test_terminal_known_presets_accepted() {
         let mut config = HcomConfig::default();
-        for preset in &["kitty", "wezterm", "tmux", "alacritty", "Terminal.app", "iTerm"] {
+        for preset in &[
+            "kitty",
+            "wezterm",
+            "tmux",
+            "alacritty",
+            "Terminal.app",
+            "iTerm",
+        ] {
             config.terminal = preset.to_string();
             assert!(
                 !config.collect_errors().contains_key("terminal"),
@@ -1562,7 +1558,10 @@ mod tests {
     fn test_load_from_sources_env_overrides_toml() {
         let mut file_config = HashMap::new();
         file_config.insert("timeout".to_string(), TomlFieldValue::Int(3600));
-        file_config.insert("tag".to_string(), TomlFieldValue::Str("file-tag".to_string()));
+        file_config.insert(
+            "tag".to_string(),
+            TomlFieldValue::Str("file-tag".to_string()),
+        );
 
         let mut env = HashMap::new();
         env.insert("HCOM_TAG".to_string(), "env-tag".to_string());
@@ -1596,7 +1595,10 @@ mod tests {
     #[test]
     fn test_load_from_sources_int_coercion() {
         let mut file_config = HashMap::new();
-        file_config.insert("timeout".to_string(), TomlFieldValue::Str("7200".to_string()));
+        file_config.insert(
+            "timeout".to_string(),
+            TomlFieldValue::Str("7200".to_string()),
+        );
 
         let env = HashMap::new();
         let config = HcomConfig::load_from_sources(&file_config, Some(&env)).unwrap();
@@ -1632,10 +1634,7 @@ mod tests {
     #[test]
     fn test_load_from_sources_terminal_empty_uses_default() {
         let mut file_config = HashMap::new();
-        file_config.insert(
-            "terminal".to_string(),
-            TomlFieldValue::Str("".to_string()),
-        );
+        file_config.insert("terminal".to_string(), TomlFieldValue::Str("".to_string()));
 
         let env = HashMap::new();
         let config = HcomConfig::load_from_sources(&file_config, Some(&env)).unwrap();
@@ -1670,8 +1669,7 @@ mod tests {
             }
         }
 
-        let roundtrip =
-            HcomConfig::load_from_sources(&file_config, Some(&HashMap::new())).unwrap();
+        let roundtrip = HcomConfig::load_from_sources(&file_config, Some(&HashMap::new())).unwrap();
         assert_eq!(config, roundtrip);
     }
 

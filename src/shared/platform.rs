@@ -89,7 +89,9 @@ pub fn shorten_path_max(path: &str, max_width: usize) -> String {
     let keep = max_width - 3; // "..."
     let start = shortened.len() - keep;
     // Find a char boundary (UTF-8 safe)
-    let start = (start..shortened.len()).find(|&i| shortened.is_char_boundary(i)).unwrap_or(shortened.len());
+    let start = (start..shortened.len())
+        .find(|&i| shortened.is_char_boundary(i))
+        .unwrap_or(shortened.len());
     // Find a clean break at a '/' if possible
     if let Some(slash) = shortened[start..].find('/') {
         let pos = start + slash;

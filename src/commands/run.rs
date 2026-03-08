@@ -7,12 +7,20 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::commands::config::{config_help, CONFIG_KEYS};
+use crate::commands::config::{CONFIG_KEYS, config_help};
 use crate::commands::help;
 use crate::db::HcomDb;
 use crate::paths::scripts_dir;
 use crate::scripts;
 use crate::shared::CommandContext;
+
+#[derive(clap::Parser, Debug)]
+#[command(name = "run", about = "Run a bundled or user workflow script")]
+pub struct RunArgs {
+    /// Script name plus forwarded args
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub args: Vec<String>,
+}
 
 /// Bundled script agent descriptions.
 fn bundled_agent_desc(name: &str) -> &'static str {
@@ -45,7 +53,11 @@ fn extract_description_from_content(content: &str) -> String {
             continue;
         }
         if stripped.starts_with('#') {
-            return stripped.strip_prefix('#').unwrap_or(stripped).trim().to_string();
+            return stripped
+                .strip_prefix('#')
+                .unwrap_or(stripped)
+                .trim()
+                .to_string();
         }
         if !stripped.is_empty() {
             break;
@@ -71,25 +83,16 @@ fn extract_description(path: &Path) -> String {
                 if stripped.starts_with("\"\"\"") || stripped.starts_with("'''") {
                     let quote = &stripped[..3];
                     if stripped.matches(quote).count() >= 2 {
-                        return stripped
-                            .trim_matches(['"', '\''])
-                            .trim()
-                            .to_string();
+                        return stripped.trim_matches(['"', '\'']).trim().to_string();
                     }
                     in_docstring = true;
                     let rest = stripped[3..].trim();
                     if !rest.is_empty() {
-                        return rest
-                            .trim_end_matches(['"', '\''])
-                            .trim()
-                            .to_string();
+                        return rest.trim_end_matches(['"', '\'']).trim().to_string();
                     }
                 } else if in_docstring {
                     if stripped.ends_with("\"\"\"") || stripped.ends_with("'''") {
-                        return stripped
-                            .trim_end_matches(['"', '\''])
-                            .trim()
-                            .to_string();
+                        return stripped.trim_end_matches(['"', '\'']).trim().to_string();
                     }
                     if !stripped.is_empty() {
                         return stripped.to_string();
@@ -250,12 +253,14 @@ fn write_embedded_to_temp(name: &str, content: &str) -> std::io::Result<tempfile
     Ok(tmp)
 }
 
-pub fn cmd_run(_db: &HcomDb, argv: &[String], ctx: Option<&CommandContext>) -> i32 {
+pub fn cmd_run(db: &HcomDb, args: &RunArgs, ctx: Option<&CommandContext>) -> i32 {
     // Re-inject --name for scripts that parse it themselves
-    let mut argv = argv.to_vec();
+    let mut argv = args.args.clone();
     if let Some(ctx) = ctx {
         if let Some(ref name) = ctx.explicit_name {
-            argv = vec!["--name".to_string(), name.clone()]
+            let canonical =
+                crate::instances::resolve_display_name(db, name).unwrap_or_else(|| name.clone());
+            argv = vec!["--name".to_string(), canonical]
                 .into_iter()
                 .chain(argv)
                 .collect();
@@ -540,6 +545,13 @@ fn print_docs(show_cli: bool, show_config: bool, show_api: bool) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn run_args_capture_script_and_flags() {
+        let args = RunArgs::try_parse_from(["run", "debate", "--topic", "hooks"]).unwrap();
+        assert_eq!(args.args, vec!["debate", "--topic", "hooks"]);
+    }
 
     #[test]
     fn test_extract_description_python() {

@@ -8,11 +8,11 @@ use crate::db::HcomDb;
 use crate::hooks::common::stop_instance;
 use crate::identity;
 use crate::instances::{
-    get_full_name, is_remote_instance, is_subagent_instance,
-    parse_running_tasks, resolve_display_name,
+    get_full_name, is_remote_instance, is_subagent_instance, parse_running_tasks,
+    resolve_display_name,
 };
 use crate::log::log_info;
-use crate::shared::{CommandContext, SenderKind, SENDER, is_inside_ai_tool};
+use crate::shared::{CommandContext, SENDER, SenderKind, is_inside_ai_tool};
 
 /// Parsed arguments for `hcom stop`.
 #[derive(clap::Parser, Debug)]
@@ -23,7 +23,11 @@ pub struct StopArgs {
 }
 
 /// Resolve the initiator name for event logging.
-fn resolve_initiator(db: &HcomDb, ctx: Option<&CommandContext>, explicit_name: Option<&str>) -> String {
+fn resolve_initiator(
+    db: &HcomDb,
+    ctx: Option<&CommandContext>,
+    explicit_name: Option<&str>,
+) -> String {
     if let Some(c) = ctx {
         if let Some(ref id) = c.identity {
             if matches!(id.kind, SenderKind::Instance) {
@@ -57,7 +61,10 @@ pub fn cmd_stop(db: &HcomDb, args: &StopArgs, ctx: Option<&CommandContext>) -> i
 
         // Only stop local instances
         let instances = match db.iter_instances_full() {
-            Ok(rows) => rows.into_iter().filter(|i| !is_remote_instance(i)).collect::<Vec<_>>(),
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|i| !is_remote_instance(i))
+                .collect::<Vec<_>>(),
             Err(e) => {
                 eprintln!("Error: {e}");
                 return 1;
@@ -76,7 +83,11 @@ pub fn cmd_stop(db: &HcomDb, args: &StopArgs, ctx: Option<&CommandContext>) -> i
         }
 
         let launcher = resolve_initiator(db, ctx, explicit_name);
-        log_info("lifecycle", "stop.all", &format!("count={} initiated_by={launcher}", instances.len()));
+        log_info(
+            "lifecycle",
+            "stop.all",
+            &format!("count={} initiated_by={launcher}", instances.len()),
+        );
 
         let mut stopped_names = Vec::new();
         let mut bg_logs = Vec::new();
@@ -109,7 +120,8 @@ pub fn cmd_stop(db: &HcomDb, args: &StopArgs, ctx: Option<&CommandContext>) -> i
     if targets.len() == 1 && targets[0].starts_with("tag:") {
         let tag = &targets[0][4..];
         let tag_matches = match db.iter_instances_full() {
-            Ok(rows) => rows.into_iter()
+            Ok(rows) => rows
+                .into_iter()
                 .filter(|i| i.tag.as_deref() == Some(tag) && !is_remote_instance(i))
                 .collect::<Vec<_>>(),
             Err(e) => {
@@ -123,8 +135,15 @@ pub fn cmd_stop(db: &HcomDb, args: &StopArgs, ctx: Option<&CommandContext>) -> i
             let orphans = crate::pidtrack::get_orphan_processes(&crate::paths::hcom_dir(), None);
             let tagged_orphans: Vec<_> = orphans.iter().filter(|o| o.tag == tag).collect();
             if !tagged_orphans.is_empty() {
-                let names: Vec<_> = tagged_orphans.iter().flat_map(|o| o.names.iter()).cloned().collect();
-                println!("No active agents with tag '{tag}' (already stopped: {})", names.join(", "));
+                let names: Vec<_> = tagged_orphans
+                    .iter()
+                    .flat_map(|o| o.names.iter())
+                    .cloned()
+                    .collect();
+                println!(
+                    "No active agents with tag '{tag}' (already stopped: {})",
+                    names.join(", ")
+                );
                 println!("Use 'hcom kill tag:{tag}' to terminate their processes.");
                 return 0;
             }
@@ -139,7 +158,14 @@ pub fn cmd_stop(db: &HcomDb, args: &StopArgs, ctx: Option<&CommandContext>) -> i
         }
 
         let launcher = resolve_initiator(db, ctx, explicit_name);
-        log_info("lifecycle", "stop.tag", &format!("tag={tag} count={} initiated_by={launcher}", tag_matches.len()));
+        log_info(
+            "lifecycle",
+            "stop.tag",
+            &format!(
+                "tag={tag} count={} initiated_by={launcher}",
+                tag_matches.len()
+            ),
+        );
 
         let mut stopped_names = Vec::new();
         let mut bg_logs = Vec::new();
@@ -177,7 +203,9 @@ pub fn cmd_stop(db: &HcomDb, args: &StopArgs, ctx: Option<&CommandContext>) -> i
             let name = resolved.as_deref().unwrap_or(t);
             match db.get_instance_full(name) {
                 Ok(Some(data)) => instances_to_stop.push(data),
-                _ => { not_found.push(t.to_string()); }
+                _ => {
+                    not_found.push(t.to_string());
+                }
             }
         }
 
@@ -243,7 +271,9 @@ pub fn cmd_stop(db: &HcomDb, args: &StopArgs, ctx: Option<&CommandContext>) -> i
         let name = match identity {
             Some(id) => id.name,
             None => {
-                eprintln!("Error: Cannot determine identity\nUsage: hcom stop <name> | hcom stop all | run 'hcom stop' inside Claude/Gemini/Codex");
+                eprintln!(
+                    "Error: Cannot determine identity\nUsage: hcom stop <name> | hcom stop all | run 'hcom stop' inside Claude/Gemini/Codex"
+                );
                 return 1;
             }
         };
@@ -280,7 +310,8 @@ pub fn cmd_stop(db: &HcomDb, args: &StopArgs, ctx: Option<&CommandContext>) -> i
         if instance_name.contains(':') {
             let (name, device_short_id) = instance_name.rsplit_once(':').unwrap();
             let config = crate::config::HcomConfig::load(None).unwrap_or_default();
-            if crate::relay::control::send_control_ephemeral(&config, "stop", name, device_short_id) {
+            if crate::relay::control::send_control_ephemeral(&config, "stop", name, device_short_id)
+            {
                 println!("Stop sent to {instance_name}");
                 return 0;
             } else {
@@ -297,7 +328,11 @@ pub fn cmd_stop(db: &HcomDb, args: &StopArgs, ctx: Option<&CommandContext>) -> i
     let reason = if is_external_stop { "external" } else { "self" };
 
     let display = get_full_name(&position);
-    log_info("lifecycle", "stop.single", &format!("name={instance_name} reason={reason} initiated_by={launcher}"));
+    log_info(
+        "lifecycle",
+        "stop.single",
+        &format!("name={instance_name} reason={reason} initiated_by={launcher}"),
+    );
 
     stop_instance(db, &instance_name, &launcher, reason);
 
@@ -327,10 +362,15 @@ fn print_stop_preview(scope: &str, cmd_suffix: &str, instances: &[crate::db::Ins
     };
 
     println!("\n== STOP {scope} PREVIEW ==");
-    println!("This will stop {count} instance{}.\n", if count != 1 { "s" } else { "" });
+    println!(
+        "This will stop {count} instance{}.\n",
+        if count != 1 { "s" } else { "" }
+    );
     println!("Instances to stop:\n  {instance_list}\n");
     println!("What happens:");
-    println!("  • Headless instances ({headless}): process killed (SIGTERM, then SIGKILL after 2s)");
+    println!(
+        "  • Headless instances ({headless}): process killed (SIGTERM, then SIGKILL after 2s)"
+    );
     println!("  • Interactive instances ({interactive}): notified via TCP (graceful)");
     println!("  • All: stopped event logged with snapshot, instance rows deleted");
     println!("  • Subagents: recursively stopped when parent stops\n");

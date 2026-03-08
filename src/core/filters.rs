@@ -38,8 +38,7 @@ const MESSAGE_FLAGS: &[&str] = &["from", "mention", "intent", "thread", "reply_t
 const LIFE_FLAGS: &[&str] = &["action"];
 
 /// File-write tool contexts for SQL filters.
-pub const FILE_WRITE_CONTEXTS: &str =
-    "('tool:Write', 'tool:Edit', 'tool:write_file', 'tool:replace', 'tool:apply_patch', 'tool:write', 'tool:edit')";
+pub const FILE_WRITE_CONTEXTS: &str = "('tool:Write', 'tool:Edit', 'tool:write_file', 'tool:replace', 'tool:apply_patch', 'tool:write', 'tool:edit')";
 
 /// All file operation contexts.
 pub const FILE_OP_CONTEXTS: &[&str] = &[
@@ -53,8 +52,7 @@ pub const FILE_OP_CONTEXTS: &[&str] = &[
 ];
 
 /// Shell tool contexts.
-pub const SHELL_TOOL_CONTEXTS: &str =
-    "('tool:Bash', 'tool:run_shell_command', 'tool:shell')";
+pub const SHELL_TOOL_CONTEXTS: &str = "('tool:Bash', 'tool:run_shell_command', 'tool:shell')";
 
 /// Parsed filter values — multiple values per key (OR semantics).
 pub type FilterMap = HashMap<String, Vec<String>>;
@@ -153,8 +151,7 @@ pub fn resolve_filter_names(filters: &mut FilterMap, db: &crate::db::HcomDb) {
         let resolved: Vec<String> = names
             .iter()
             .map(|name| {
-                crate::instances::resolve_display_name(db, name)
-                    .unwrap_or_else(|| name.clone())
+                crate::instances::resolve_display_name(db, name).unwrap_or_else(|| name.clone())
             })
             .collect();
         *names = resolved;
@@ -186,7 +183,11 @@ pub fn validate_type_constraints(filters: &FilterMap) -> Result<(), String> {
         if !conflicting.is_empty() {
             return Err(format!(
                 "Filters require type {{{}}} but --type specified {{{}}}",
-                conflicting.iter().map(|t| **t).collect::<Vec<_>>().join(", "),
+                conflicting
+                    .iter()
+                    .map(|t| **t)
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 explicit.join(", ")
             ));
         }
@@ -281,7 +282,11 @@ pub fn build_sql_from_flags(filters: &FilterMap) -> Result<String, String> {
             .map(|pattern| {
                 if pattern.contains('*') {
                     let parts: Vec<&str> = pattern.split('*').collect();
-                    let sql_pattern: String = parts.iter().map(|p| escape_sql_like(p)).collect::<Vec<_>>().join("%");
+                    let sql_pattern: String = parts
+                        .iter()
+                        .map(|p| escape_sql_like(p))
+                        .collect::<Vec<_>>()
+                        .join("%");
                     format!("status_context LIKE '{}' ESCAPE '\\'", sql_pattern)
                 } else {
                     format!("status_context = '{}'", escape_sql(pattern))
@@ -299,7 +304,11 @@ pub fn build_sql_from_flags(filters: &FilterMap) -> Result<String, String> {
             .map(|pattern| {
                 if pattern.contains('*') {
                     let parts: Vec<&str> = pattern.split('*').collect();
-                    let sql_pattern: String = parts.iter().map(|p| escape_sql_like(p)).collect::<Vec<_>>().join("%");
+                    let sql_pattern: String = parts
+                        .iter()
+                        .map(|p| escape_sql_like(p))
+                        .collect::<Vec<_>>()
+                        .join("%");
                     format!("status_detail LIKE '{}' ESCAPE '\\'", sql_pattern)
                 } else {
                     format!(
@@ -549,7 +558,8 @@ mod tests {
 
     #[test]
     fn test_parse_agent_flag() {
-        let (filters, remaining) = parse_event_flags(&s(&["--agent", "peso", "--last", "20"])).unwrap();
+        let (filters, remaining) =
+            parse_event_flags(&s(&["--agent", "peso", "--last", "20"])).unwrap();
         assert_eq!(filters["instance"], vec!["peso"]);
         assert_eq!(remaining, s(&["--last", "20"]));
     }
@@ -569,8 +579,7 @@ mod tests {
 
     #[test]
     fn test_parse_multiple_same_flag() {
-        let (filters, _) =
-            parse_event_flags(&s(&["--agent", "peso", "--agent", "luna"])).unwrap();
+        let (filters, _) = parse_event_flags(&s(&["--agent", "peso", "--agent", "luna"])).unwrap();
         assert_eq!(filters["instance"], vec!["peso", "luna"]);
     }
 

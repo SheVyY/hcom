@@ -377,12 +377,7 @@ pub(crate) fn cursor_wrap_up(text: &str, cursor: &mut usize, total_width: u16, p
 
 /// Move cursor down one visual wrapped line, preserving display column.
 /// No-op if already on the last wrapped line.
-pub(crate) fn cursor_wrap_down(
-    text: &str,
-    cursor: &mut usize,
-    total_width: u16,
-    prefix_w: usize,
-) {
+pub(crate) fn cursor_wrap_down(text: &str, cursor: &mut usize, total_width: u16, prefix_w: usize) {
     let total_lines = wrap_line_count(text, total_width, prefix_w);
     let cur_line = cursor_wrap_line(text, *cursor, total_width, prefix_w);
     if cur_line + 1 >= total_lines {
@@ -440,7 +435,7 @@ fn render_inline(frame: &mut Frame, app: &mut App, area: Rect) {
         constraints.push(Constraint::Length(launch_height));
     }
     constraints.push(Constraint::Length(input_height)); // input
-    constraints.push(Constraint::Length(1));             // footer
+    constraints.push(Constraint::Length(1)); // footer
 
     let layout = Layout::vertical(constraints).split(area);
     let n = layout.len();
@@ -513,9 +508,9 @@ fn render_vertical(frame: &mut Frame, app: &mut App, area: Rect) {
         outer.push(Constraint::Length(launch_height));
     }
     let input_height = compose_input_height(app, false, area.width);
-    outer.push(Constraint::Length(1));            // blank
+    outer.push(Constraint::Length(1)); // blank
     outer.push(Constraint::Length(input_height)); // input
-    outer.push(Constraint::Length(1));            // footer
+    outer.push(Constraint::Length(1)); // footer
 
     let vlayout = Layout::vertical(outer).split(area);
     let n = vlayout.len();
@@ -1032,9 +1027,13 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
             let scroll = app.ui.input_scroll;
 
             let mut lines: Vec<Line> = Vec::new();
-            for (i, vline) in visual_lines.iter().enumerate().skip(scroll).take(visible_rows) {
-                let text_span =
-                    Span::styled(vline.clone(), Style::default().fg(palette::FG));
+            for (i, vline) in visual_lines
+                .iter()
+                .enumerate()
+                .skip(scroll)
+                .take(visible_rows)
+            {
+                let text_span = Span::styled(vline.clone(), Style::default().fg(palette::FG));
                 if i == 0 {
                     lines.push(Line::from(vec![
                         Span::raw("  "),
@@ -1052,8 +1051,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
                 ]));
             }
 
-            let text_area =
-                Rect::new(area.x, area.y + 1, area.width, (visible_rows as u16).max(1));
+            let text_area = Rect::new(area.x, area.y + 1, area.width, (visible_rows as u16).max(1));
             frame.render_widget(Paragraph::new(lines), text_area);
 
             // Send target hint (only when text fits on one line)

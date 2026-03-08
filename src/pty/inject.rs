@@ -1,22 +1,4 @@
-//! TCP injection server for external text injection.
-//!
-//! Listens on 127.0.0.1:0 (auto-assign port) and accepts text injection.
-//!
-//! ## Protocol
-//!
-//! 1. Client connects to inject port
-//! 2. Client sends text data
-//! 3. Client closes connection (signals EOF)
-//! 4. Server strips trailing `\n` (from echo/nc) but preserves `\r` for submit
-//! 5. Server writes text to PTY master
-//!
-//! ## Submit vs Text-only
-//!
-//! - Text ending with `\r`: Submitted (Enter pressed)
-//! - Text without `\r`: Text-only injection (for verification before Enter)
-//!
-//! The delivery loop uses text-only injection first, waits for the text to
-//! appear in the input box, then sends a separate `\r` to submit.
+//! TCP injection server — accepts text on a local port and writes to PTY master.
 
 use anyhow::{Context, Result};
 use std::io::{Read, Write};

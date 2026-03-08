@@ -1,15 +1,4 @@
 //! `hcom send` command — send messages to hcom instances.
-//!
-//!
-//! Supports 5 message source modes:
-//! - `--` separator (literal text after --)
-//! - `--stdin` (read from stdin)
-//! - `--file <path>` (read from file)
-//! - `--base64 <encoded>` (base64 decode)
-//! - auto-pipe (detect stdin pipe when no explicit source)
-//!
-//! Also: @mention routing, --intent, --reply-to, --thread, --from/-b,
-//! subagent spoofing guard, identity gating, unread delivery for adhoc.
 
 use std::io::{IsTerminal, Read as IoRead};
 
@@ -17,13 +6,10 @@ use crate::db::HcomDb;
 use crate::identity;
 use crate::instances;
 use crate::messages::{
-    compute_scope, should_deliver_message, validate_intent, validate_message,
-    InstanceInfo, MessageEnvelope, MessageIntent, MessageScope,
+    InstanceInfo, MessageEnvelope, MessageScope, compute_scope, should_deliver_message,
+    validate_intent, validate_message,
 };
-use crate::shared::{
-    CommandContext, SenderIdentity, SenderKind, SENDER,
-    status_icon,
-};
+use crate::shared::{CommandContext, SENDER, SenderIdentity, SenderKind, status_icon};
 
 const SEND_AFTER_HELP: &str = "\
 Target matching:
@@ -149,7 +135,7 @@ pub struct SendArgs {
 
 impl SendArgs {
     /// Resolve the effective --from name (--from overrides -b).
-    fn from_name(&self) -> Option<String> {
+    fn sender_name(&self) -> Option<String> {
         if let Some(ref name) = self.from {
             Some(name.clone())
         } else if self.bigboss {
@@ -194,9 +180,10 @@ impl SendArgs {
             )
         })?;
 
-        let description = self.description.as_ref().ok_or(
-            "--description is required when --title is present",
-        )?;
+        let description = self
+            .description
+            .as_ref()
+            .ok_or("--description is required when --title is present")?;
 
         use crate::core::bundles::parse_csv_list;
         let events = parse_csv_list(self.events.as_deref());
@@ -214,7 +201,9 @@ impl SendArgs {
         });
 
         if let Some(ref ext) = self.extends {
-            bundle.as_object_mut().unwrap()
+            bundle
+                .as_object_mut()
+                .unwrap()
                 .insert("extends".into(), serde_json::json!(ext));
         }
 
@@ -254,10 +243,7 @@ pub fn send_message(
     envelope: Option<&MessageEnvelope>,
     explicit_targets: Option<&[String]>,
 ) -> Result<Vec<String>, String> {
-    // Validate message
-    if let Some(err) = validate_message(message) {
-        return Err(err);
-    }
+    validate_message(message)?;
 
     // Get participating instances
     let rows: Vec<InstanceInfo> = db
@@ -279,7 +265,11 @@ pub fn send_message(
 
     // Build scope data for should_deliver_message
     let scope_str = scope_result.scope.as_str();
-    let mentions_json: Vec<serde_json::Value> = scope_result.mentions.iter().map(|m| serde_json::json!(m)).collect();
+    let mentions_json: Vec<serde_json::Value> = scope_result
+        .mentions
+        .iter()
+        .map(|m| serde_json::json!(m))
+        .collect();
     let mut scope_data = serde_json::json!({
         "scope": scope_str,
     });
@@ -291,7 +281,6 @@ pub fn send_message(
         scope_data["group_id"] = serde_json::json!(gid);
     }
 
-    // Compute delivered_to
     let delivered_to: Vec<String> = rows
         .iter()
         .filter(|inst| {
@@ -318,7 +307,6 @@ pub fn send_message(
         data["mentions"] = serde_json::json!(scope_result.mentions);
     }
 
-    // Add envelope fields
     if let Some(env) = envelope {
         if let Some(intent) = &env.intent {
             data["intent"] = serde_json::json!(intent.as_str());
@@ -427,7 +415,7 @@ fn get_intent_from_event(db: &HcomDb, event_id: i64) -> Option<String> {
 /// Create request-watch subscriptions for each recipient.
 fn create_request_watches(db: &HcomDb, sender: &str, request_event_id: i64, recipients: &[String]) {
     let last_id = db.get_last_event_id();
-    let now = crate::shared::constants::now_epoch_f64();
+    let now = crate::shared::time::now_epoch_f64();
 
     for recipient in recipients {
         let sub_id = format!("reqwatch-{request_event_id}-{recipient}");
@@ -460,10 +448,15 @@ fn resolve_message(args: &SendArgs) -> Result<String, String> {
     let has_separator = args.has_separator();
 
     // Mutual exclusivity
-    let source_count = [args.stdin, args.file.is_some(), args.base64.is_some(), has_separator]
-        .iter()
-        .filter(|&&x| x)
-        .count();
+    let source_count = [
+        args.stdin,
+        args.file.is_some(),
+        args.base64.is_some(),
+        has_separator,
+    ]
+    .iter()
+    .filter(|&&x| x)
+    .count();
     if source_count > 1 {
         return Err("Only one of --, --stdin, --file, --base64 can be used".to_string());
     }
@@ -505,8 +498,8 @@ fn resolve_message(args: &SendArgs) -> Result<String, String> {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(b64)
             .map_err(|_| "Invalid base64 encoding".to_string())?;
-        let s = String::from_utf8(bytes)
-            .map_err(|_| "Base64 decoded to invalid UTF-8".to_string())?;
+        let s =
+            String::from_utf8(bytes).map_err(|_| "Base64 decoded to invalid UTF-8".to_string())?;
         if s.is_empty() {
             return Err("Base64 decoded to empty string".to_string());
         }
@@ -522,9 +515,18 @@ fn resolve_message(args: &SendArgs) -> Result<String, String> {
     let targets_str = if args.positionals.is_empty() {
         "@target".to_string()
     } else {
-        args.positionals.iter().take(3).map(|t| {
-            if t.starts_with('@') { t.clone() } else { format!("@{t}") }
-        }).collect::<Vec<_>>().join(" ")
+        args.positionals
+            .iter()
+            .take(3)
+            .map(|t| {
+                if t.starts_with('@') {
+                    t.clone()
+                } else {
+                    format!("@{t}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     };
     Err(format!(
         "No message provided.\nUse: hcom send {targets_str} -- your message\n Or: echo 'msg' | hcom send {targets_str}"
@@ -563,8 +565,8 @@ fn process_positionals(positionals: &[String]) -> (Vec<String>, Option<String>) 
     let mut remaining = Vec::new();
 
     for arg in positionals {
-        if arg.starts_with('@') {
-            targets.push(arg[1..].to_string());
+        if let Some(name) = arg.strip_prefix('@') {
+            targets.push(name.to_string());
         } else {
             remaining.push(arg.clone());
         }
@@ -588,15 +590,16 @@ fn process_positionals(positionals: &[String]) -> (Vec<String>, Option<String>) 
 /// Returns exit code (0 = success, 1 = error).
 pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i32 {
     // ── Resolve --from name ──
-    let from_name = args.from_name();
+    let from_name = args.sender_name();
 
-    // Validate --from name
     if let Some(ref name) = from_name {
         if name.is_empty() || name.len() > 50 {
             eprintln!("Error: Name too long ({} chars, max 50)", name.len());
             return 1;
         }
-        if name.contains(['@', '|', '&', ';', '<', '>', '`', '$', '\'', '"', '\\', '\n', '\r']) {
+        if name.contains([
+            '@', '|', '&', ';', '<', '>', '`', '$', '\'', '"', '\\', '\n', '\r',
+        ]) {
             eprintln!("Error: Name contains invalid characters");
             return 1;
         }
@@ -605,18 +608,24 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
     // Guard: subagents cannot use --from/-b
     if from_name.is_some() {
         let actor_from_ctx = ctx.and_then(|c| c.identity.clone());
-        let actor = actor_from_ctx.or_else(|| {
-            identity::resolve_identity(db, None, None, None, None, None, None).ok()
-        });
-        if let Some(ref actor) = actor {
-            if matches!(actor.kind, SenderKind::Instance) {
+        let actor = actor_from_ctx
+            .or_else(|| identity::resolve_identity(db, None, None, None, None, None, None).ok());
+        match actor {
+            Some(ref actor) if matches!(actor.kind, SenderKind::Instance) => {
                 if let Some(ref data) = actor.instance_data {
-                    if data.get("parent_name").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
-                        eprintln!("Error: Subagents cannot use --from/-b (external sender spoofing)");
+                    if data
+                        .get("parent_name")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.is_empty())
+                    {
+                        eprintln!(
+                            "Error: Subagents cannot use --from/-b (external sender spoofing)"
+                        );
                         return 1;
                     }
                 }
             }
+            _ => {}
         }
     }
 
@@ -631,7 +640,7 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
             eprintln!("Error: {e}");
             return 1;
         }
-        envelope.intent = MessageIntent::from_str(&val);
+        envelope.intent = val.parse().ok();
     }
 
     envelope.reply_to = args.reply_to.clone();
@@ -641,7 +650,10 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
             eprintln!("Error: Thread name too long ({} chars, max 64)", val.len());
             return 1;
         }
-        if !val.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        if !val
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
             eprintln!("Error: Thread name must be alphanumeric with hyphens/underscores");
             return 1;
         }
@@ -654,7 +666,6 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
         return 1;
     }
 
-    // Validate reply_to exists and inherit thread
     if let Some(ref reply_to) = envelope.reply_to {
         if let Some(local_id) = resolve_reply_to_local(db, reply_to) {
             if envelope.thread.is_none() {
@@ -682,33 +693,30 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
     //   - Single "@name message" (with space) → entire text is message, @mention parsed by compute_scope
     //   - Non-@ args → message text (broadcast)
     //   - Pure @targets → explicit targets
-    let (effective_targets, compat_message) = if !args.has_separator()
-        && !args.stdin
-        && args.file.is_none()
-        && args.base64.is_none()
-    {
-        process_positionals(&args.positionals)
-    } else {
-        // With -- separator or explicit source: validate @targets
-        let mut validated = Vec::new();
-        for arg in &args.positionals {
-            if let Some(stripped) = arg.strip_prefix('@') {
-                if stripped.is_empty() {
-                    eprintln!("Error: Empty target '@' is not allowed");
+    let (effective_targets, compat_message) =
+        if !args.has_separator() && !args.stdin && args.file.is_none() && args.base64.is_none() {
+            process_positionals(&args.positionals)
+        } else {
+            // With -- separator or explicit source: validate @targets
+            let mut validated = Vec::new();
+            for arg in &args.positionals {
+                if let Some(stripped) = arg.strip_prefix('@') {
+                    if stripped.is_empty() {
+                        eprintln!("Error: Empty target '@' is not allowed");
+                        return 1;
+                    }
+                    validated.push(stripped.to_string());
+                } else {
+                    let mut msg = format!("Error: Unexpected argument '{arg}'");
+                    if arg.chars().all(|c| c.is_alphabetic()) && arg.len() <= 20 {
+                        msg.push_str(&format!("\nDid you mean @{arg}? Targets require @"));
+                    }
+                    eprintln!("{msg}");
                     return 1;
                 }
-                validated.push(stripped.to_string());
-            } else {
-                let mut msg = format!("Error: Unexpected argument '{arg}'");
-                if arg.chars().all(|c| c.is_alphabetic()) && arg.len() <= 20 {
-                    msg.push_str(&format!("\nDid you mean @{arg}? Targets require @"));
-                }
-                eprintln!("{msg}");
-                return 1;
             }
-        }
-        (validated, None)
-    };
+            (validated, None)
+        };
 
     // ── Resolve message ──
     let mut message = if let Some(msg) = compat_message {
@@ -723,8 +731,7 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
         }
     };
 
-    // Validate message
-    if let Some(err) = validate_message(&message) {
+    if let Err(err) = validate_message(&message) {
         eprintln!("Error: {err}");
         return 1;
     }
@@ -780,31 +787,65 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
             SenderKind::Instance => sender_identity.name.clone(),
         };
 
-        match crate::core::bundles::create_bundle_event(&mut bundle, &bundle_instance, Some(&sender_identity.name), db) {
+        match crate::core::bundles::create_bundle_event(
+            &mut bundle,
+            &bundle_instance,
+            Some(&sender_identity.name),
+            db,
+        ) {
             Ok(bundle_id) => {
                 crate::relay::worker::maybe_auto_spawn();
                 envelope.bundle_id = Some(bundle_id.clone());
 
                 // Append bundle summary text to message
                 let refs = bundle.get("refs").cloned().unwrap_or(serde_json::json!({}));
-                let events = refs.get("events").and_then(|v| v.as_array()).map(|a| {
-                    a.iter().filter_map(|v| v.as_str().or(v.as_i64().map(|_| "")).or(Some(""))).map(|s| s.to_string()).collect::<Vec<_>>().join(", ")
-                }).unwrap_or_default();
-                let files = refs.get("files").and_then(|v| v.as_array()).map(|a| {
-                    a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
-                }).unwrap_or_default();
-                let transcript = refs.get("transcript").and_then(|v| v.as_array()).map(|a| {
-                    a.iter().filter_map(|v| {
-                        if let Some(obj) = v.as_object() {
-                            Some(format!("{}:{}", obj.get("range").and_then(|r| r.as_str()).unwrap_or(""), obj.get("detail").and_then(|d| d.as_str()).unwrap_or("")))
-                        } else {
-                            v.as_str().map(|s| s.to_string())
-                        }
-                    }).collect::<Vec<_>>().join(", ")
-                }).unwrap_or_default();
+                let events = refs
+                    .get("events")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().or(v.as_i64().map(|_| "")).or(Some("")))
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                let files = refs
+                    .get("files")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                let transcript = refs
+                    .get("transcript")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| {
+                                if let Some(obj) = v.as_object() {
+                                    Some(format!(
+                                        "{}:{}",
+                                        obj.get("range").and_then(|r| r.as_str()).unwrap_or(""),
+                                        obj.get("detail").and_then(|d| d.as_str()).unwrap_or("")
+                                    ))
+                                } else {
+                                    v.as_str().map(|s| s.to_string())
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
 
                 let title = bundle.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                let description = bundle.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let description = bundle
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let extends = bundle.get("extends").and_then(|v| v.as_str());
 
                 let mut bundle_lines = vec![
@@ -833,12 +874,16 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
     }
 
     // ── Send message ──
-    let has_envelope = envelope.intent.is_some() || envelope.reply_to.is_some() || envelope.thread.is_some() || envelope.bundle_id.is_some();
-    let targets_to_pass: Option<&[String]> = if args.has_separator() || !effective_targets.is_empty() {
-        Some(&effective_targets)
-    } else {
-        None
-    };
+    let has_envelope = envelope.intent.is_some()
+        || envelope.reply_to.is_some()
+        || envelope.thread.is_some()
+        || envelope.bundle_id.is_some();
+    let targets_to_pass: Option<&[String]> =
+        if args.has_separator() || !effective_targets.is_empty() {
+            Some(&effective_targets)
+        } else {
+            None
+        };
 
     let delivered_to = match send_message(
         db,
@@ -948,28 +993,47 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
 }
 
 /// Format messages for hook display (no ANSI).
-fn format_messages_for_hook(db: &HcomDb, messages: &[&crate::db::Message], instance_name: &str) -> String {
+fn format_messages_for_hook(
+    db: &HcomDb,
+    messages: &[&crate::db::Message],
+    instance_name: &str,
+) -> String {
     let recipient_display = instances::get_display_name(db, instance_name);
 
     if messages.len() == 1 {
         let msg = messages[0];
         let sender_display = instances::get_display_name(db, &msg.from);
-        let prefix = cli_context_build_prefix(msg.intent.as_deref(), msg.thread.as_deref(), msg.event_id);
-        format!("{prefix} {sender_display} → {recipient_display}: {}", msg.text)
+        let prefix =
+            cli_context_build_prefix(msg.intent.as_deref(), msg.thread.as_deref(), msg.event_id);
+        format!(
+            "{prefix} {sender_display} → {recipient_display}: {}",
+            msg.text
+        )
     } else {
         let parts: Vec<String> = messages
             .iter()
             .map(|msg| {
                 let sender_display = instances::get_display_name(db, &msg.from);
-                let prefix = cli_context_build_prefix(msg.intent.as_deref(), msg.thread.as_deref(), msg.event_id);
-                format!("{prefix} {sender_display} → {recipient_display}: {}", msg.text)
+                let prefix = cli_context_build_prefix(
+                    msg.intent.as_deref(),
+                    msg.thread.as_deref(),
+                    msg.event_id,
+                );
+                format!(
+                    "{prefix} {sender_display} → {recipient_display}: {}",
+                    msg.text
+                )
             })
             .collect();
         format!("[{} new messages] | {}", parts.len(), parts.join(" | "))
     }
 }
 
-fn cli_context_build_prefix(intent: Option<&str>, thread: Option<&str>, event_id: Option<i64>) -> String {
+fn cli_context_build_prefix(
+    intent: Option<&str>,
+    thread: Option<&str>,
+    event_id: Option<i64>,
+) -> String {
     let id_ref = event_id.map(|id| format!("#{id}")).unwrap_or_default();
     let prefix = match (intent, thread) {
         (Some(i), Some(t)) => format!("{i}:{t}"),
@@ -1012,14 +1076,18 @@ mod tests {
 
     #[test]
     fn parse_with_intent_flag() {
-        let args = SendArgs::try_parse_from(["send", "--intent", "request", "@luna", "--", "hello"]).unwrap();
+        let args =
+            SendArgs::try_parse_from(["send", "--intent", "request", "@luna", "--", "hello"])
+                .unwrap();
         assert_eq!(args.intent.as_deref(), Some("request"));
         assert_eq!(args.positionals, vec!["@luna"]);
     }
 
     #[test]
     fn parse_flags_after_targets() {
-        let args = SendArgs::try_parse_from(["send", "@luna", "--intent", "request", "--", "hello"]).unwrap();
+        let args =
+            SendArgs::try_parse_from(["send", "@luna", "--intent", "request", "--", "hello"])
+                .unwrap();
         assert_eq!(args.intent.as_deref(), Some("request"));
         assert_eq!(args.positionals, vec!["@luna"]);
     }
@@ -1028,13 +1096,14 @@ mod tests {
     fn parse_bigboss_flag() {
         let args = SendArgs::try_parse_from(["send", "-b", "--", "hello"]).unwrap();
         assert!(args.bigboss);
-        assert_eq!(args.from_name(), Some("bigboss".to_string()));
+        assert_eq!(args.sender_name(), Some("bigboss".to_string()));
     }
 
     #[test]
     fn parse_from_overrides_bigboss() {
-        let args = SendArgs::try_parse_from(["send", "-b", "--from", "reviewer", "--", "hello"]).unwrap();
-        assert_eq!(args.from_name(), Some("reviewer".to_string()));
+        let args =
+            SendArgs::try_parse_from(["send", "-b", "--from", "reviewer", "--", "hello"]).unwrap();
+        assert_eq!(args.sender_name(), Some("reviewer".to_string()));
     }
 
     #[test]
@@ -1060,7 +1129,17 @@ mod tests {
 
     #[test]
     fn parse_reply_to_and_thread() {
-        let args = SendArgs::try_parse_from(["send", "--reply-to", "42", "--thread", "pr-99", "@luna", "--", "hi"]).unwrap();
+        let args = SendArgs::try_parse_from([
+            "send",
+            "--reply-to",
+            "42",
+            "--thread",
+            "pr-99",
+            "@luna",
+            "--",
+            "hi",
+        ])
+        .unwrap();
         assert_eq!(args.reply_to.as_deref(), Some("42"));
         assert_eq!(args.thread.as_deref(), Some("pr-99"));
     }
@@ -1074,10 +1153,22 @@ mod tests {
     #[test]
     fn parse_inline_bundle_flags() {
         let args = SendArgs::try_parse_from([
-            "send", "-b", "--title", "my-bundle", "--description", "desc",
-            "--events", "1-10", "--files", "a.py", "--transcript", "1-5:normal",
-            "--", "msg",
-        ]).unwrap();
+            "send",
+            "-b",
+            "--title",
+            "my-bundle",
+            "--description",
+            "desc",
+            "--events",
+            "1-10",
+            "--files",
+            "a.py",
+            "--transcript",
+            "1-5:normal",
+            "--",
+            "msg",
+        ])
+        .unwrap();
         assert_eq!(args.title.as_deref(), Some("my-bundle"));
         assert_eq!(args.description.as_deref(), Some("desc"));
         assert_eq!(args.events.as_deref(), Some("1-10"));
@@ -1123,15 +1214,25 @@ mod tests {
 
     #[test]
     fn parse_message_with_dashes() {
-        let args = SendArgs::try_parse_from(["send", "@luna", "--", "--this", "is", "a", "message"]).unwrap();
+        let args =
+            SendArgs::try_parse_from(["send", "@luna", "--", "--this", "is", "a", "message"])
+                .unwrap();
         assert_eq!(args.message, vec!["--this", "is", "a", "message"]);
     }
 
     #[test]
     fn parse_extends_flag() {
         let args = SendArgs::try_parse_from([
-            "send", "-b", "--title", "t", "--extends", "abc123", "--", "msg",
-        ]).unwrap();
+            "send",
+            "-b",
+            "--title",
+            "t",
+            "--extends",
+            "abc123",
+            "--",
+            "msg",
+        ])
+        .unwrap();
         assert_eq!(args.extends.as_deref(), Some("abc123"));
     }
 

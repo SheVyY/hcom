@@ -1,23 +1,4 @@
-//! Delivery loop for injecting messages into PTY
-//!
-//! - Gate checks (idle, ready, prompt empty, output stable, user activity, approval)
-//! - Three-phase verification (text render -> text clear -> cursor advance)
-//! - Fixed 1s retry poll (TCP notify handles fast path)
-//!
-//! ## Design Goals
-//!
-//! - Zero periodic DB polling when there are no pending messages
-//! - Delivery attempts happen only after a wake event or bounded retry tick
-//! - When unsafe (not at prompt, user typing, approval), retry backs off
-//! - Verify delivery via cursor advance (hook reads messages, advances cursor)
-//!
-//! ## States
-//!
-//! - `Idle`: No pending messages, sleeping on notifier
-//! - `Pending`: Messages exist, waiting for safe gate to inject
-//! - `WaitTextRender`: Text-only injected, waiting for text to appear in input box
-//! - `WaitTextClear`: Enter sent, waiting for text to clear from input box
-//! - `VerifyCursor`: Waiting for cursor advance to confirm delivery
+//! PTY message delivery loop — injects messages via TCP, verifies via cursor advance.
 
 use std::io::Write;
 use std::net::TcpStream;
@@ -28,8 +9,8 @@ use std::time::{Duration, Instant};
 use crate::config::Config;
 use crate::db::HcomDb;
 use crate::log::{log_error, log_info, log_warn};
-use crate::shared::{ST_ACTIVE, ST_LISTENING};
 use crate::notify::NotifyServer;
+use crate::shared::{ST_ACTIVE, ST_BLOCKED, ST_LISTENING};
 
 /// Safely truncate a string to at most `max_chars` characters.
 /// Unlike byte slicing `&s[..n]`, this won't panic on multi-byte UTF-8.
@@ -64,7 +45,11 @@ fn refresh_binding(
                 &format!("Instance name changed: {} -> {}", current_name, new_name),
             );
             if let Err(e) = db.migrate_notify_endpoints(current_name, &new_name) {
-                log_warn("native", "delivery.migrate_endpoints_fail", &format!("{}", e));
+                log_warn(
+                    "native",
+                    "delivery.migrate_endpoints_fail",
+                    &format!("{}", e),
+                );
             }
             if let Err(e) = db.update_tcp_mode(&new_name, true) {
                 log_warn("native", "delivery.update_tcp_mode_fail", &format!("{}", e));
@@ -341,6 +326,7 @@ impl ToolConfig {
             Ok(Tool::Gemini) => Self::gemini(),
             Ok(Tool::Codex) => Self::codex(),
             Ok(Tool::OpenCode) => Self::opencode(),
+            Ok(Tool::Adhoc) => Self::claude(),
             Err(_) => Self::claude(), // Default to Claude config for unknown tools
         }
     }
@@ -641,7 +627,10 @@ pub fn run_delivery_loop(
                 log_info(
                     "native",
                     "delivery.opencode_skip_inject",
-                    &format!("{}: session already exists, plugin handles delivery", current_name),
+                    &format!(
+                        "{}: session already exists, plugin handles delivery",
+                        current_name
+                    ),
                 );
             }
             if !first_message_injected && db.has_pending(&current_name) {
@@ -712,7 +701,7 @@ pub fn run_delivery_loop(
             match delivery_state {
                 State::Idle => {
                     // Capture wall clock before wait to detect system sleep
-                    let wall_before = crate::shared::constants::now_epoch_i64() as u64;
+                    let wall_before = crate::shared::time::now_epoch_i64() as u64;
 
                     // Wait for notification or timeout
                     let notified = notify.wait(IDLE_WAIT);
@@ -727,7 +716,7 @@ pub fn run_delivery_loop(
                     }
 
                     // Detect sleep/wake: wall clock jumped more than expected for IDLE_WAIT
-                    let wall_after = crate::shared::constants::now_epoch_i64() as u64;
+                    let wall_after = crate::shared::time::now_epoch_i64() as u64;
                     let wall_elapsed = wall_after.saturating_sub(wall_before);
                     if wall_elapsed > 45 {
                         log_info(
@@ -757,6 +746,29 @@ pub fn run_delivery_loop(
                     }
                     if let Err(e) = db.register_inject_port(&current_name, state.inject_port) {
                         log_warn("native", "delivery.register_inject_fail", &format!("{}", e));
+                    }
+
+                    // Clear stale PTY-owned approval state even when no messages are pending.
+                    if let Ok(Some((status, context))) = db.get_status(&current_name) {
+                        if status == ST_BLOCKED && context == "pty:approval" {
+                            let approval_showing = {
+                                let screen = state.screen.read().unwrap();
+                                screen.approval
+                            };
+                            if !approval_showing {
+                                if let Err(e) = db.set_status(
+                                    &current_name,
+                                    ST_LISTENING,
+                                    "pty:approval_cleared",
+                                ) {
+                                    log_warn(
+                                        "native",
+                                        "delivery.set_status_fail",
+                                        &format!("Failed to clear PTY approval status: {}", e),
+                                    );
+                                }
+                            }
+                        }
                     }
 
                     // Check for pending messages
@@ -907,16 +919,20 @@ pub fn run_delivery_loop(
                             screen.approval
                         };
                         if approval_showing {
-                            // Approval detected via PTY (OSC9 for Codex, screen pattern for others)
-                            // Set status="blocked" immediately:
-                            // - Codex: OSC9 is THE primary mechanism (no hooks)
-                            // - Claude/Gemini: fallback if hooks didn't fire
-                            if let Err(e) = db.set_status(&current_name, "blocked", "pty:approval") {
-                                log_warn("native", "delivery.set_status_fail", &format!("Failed to set blocked status: {}", e));
+                            // Approval detected via PTY (currently Codex OSC9).
+                            // Only PTY-owned blocked state should be cleared from this path.
+                            if let Err(e) = db.set_status(&current_name, "blocked", "pty:approval")
+                            {
+                                log_warn(
+                                    "native",
+                                    "delivery.set_status_fail",
+                                    &format!("Failed to set blocked status: {}", e),
+                                );
                             }
                         } else if gate.reason == "not_idle" {
                             // Stability-based recovery: if status stuck "active" but output stable 10s,
-                            // assume ESC cancelled or hook didn't fire - flip to listening.
+                            // or stale PTY approval was left behind after the PTY cleared,
+                            // flip back to listening.
                             // NOTE: stability tracking has false positives from escape sequences,
                             // but still useful for true idle detection when no data arrives at all.
                             match db.get_status(&current_name) {
@@ -931,7 +947,11 @@ pub fn run_delivery_loop(
                                             "listening",
                                             "pty:recovered",
                                         ) {
-                                            log_warn("native", "delivery.set_status_fail", &format!("Failed to set recovered status: {}", e));
+                                            log_warn(
+                                                "native",
+                                                "delivery.set_status_fail",
+                                                &format!("Failed to set recovered status: {}", e),
+                                            );
                                         }
                                         log_info(
                                             "native",
@@ -944,6 +964,23 @@ pub fn run_delivery_loop(
                                         attempt = 0;
                                         continue;
                                     }
+                                }
+                                Ok(Some((status, context)))
+                                    if status == ST_BLOCKED && context == "pty:approval" =>
+                                {
+                                    if let Err(e) = db.set_status(
+                                        &current_name,
+                                        ST_LISTENING,
+                                        "pty:approval_cleared",
+                                    ) {
+                                        log_warn(
+                                            "native",
+                                            "delivery.set_status_fail",
+                                            &format!("Failed to clear PTY approval status: {}", e),
+                                        );
+                                    }
+                                    attempt = 0;
+                                    continue;
                                 }
                                 Ok(Some(_)) | Ok(None) => {
                                     // Status not "active" or not found - skip recovery
@@ -968,7 +1005,11 @@ pub fn run_delivery_loop(
                                                     &context,
                                                     "waiting for idle status",
                                                 ) {
-                                                    log_warn("native", "delivery.gate_status_fail", &format!("{}", e));
+                                                    log_warn(
+                                                        "native",
+                                                        "delivery.gate_status_fail",
+                                                        &format!("{}", e),
+                                                    );
                                                 }
                                                 last_block_context = context;
                                             }
@@ -1252,7 +1293,11 @@ pub fn run_delivery_loop(
                             // Clear gate block status
                             if !last_block_context.is_empty() {
                                 if let Err(e) = db.set_gate_status(&current_name, "", "") {
-                                    log_warn("native", "delivery.gate_clear_fail", &format!("{}", e));
+                                    log_warn(
+                                        "native",
+                                        "delivery.gate_clear_fail",
+                                        &format!("{}", e),
+                                    );
                                 }
                                 last_block_context.clear();
                             }
@@ -1331,12 +1376,20 @@ pub fn run_delivery_loop(
             ("exit:closed", "closed")
         };
         if let Err(e) = db.set_status(&current_name, "inactive", exit_context) {
-            log_warn("native", "delivery.set_status_fail", &format!("Failed to set inactive status: {}", e));
+            log_warn(
+                "native",
+                "delivery.set_status_fail",
+                &format!("Failed to set inactive status: {}", e),
+            );
         }
 
         // 3. Delete notify endpoints and event subscriptions
         if let Err(e) = db.delete_notify_endpoints(&current_name) {
-            log_warn("native", "delivery.cleanup_endpoints_fail", &format!("{}", e));
+            log_warn(
+                "native",
+                "delivery.cleanup_endpoints_fail",
+                &format!("{}", e),
+            );
         }
         if let Err(e) = db.cleanup_subscriptions(&current_name) {
             log_warn("native", "delivery.cleanup_subs_fail", &format!("{}", e));

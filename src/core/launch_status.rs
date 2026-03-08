@@ -65,12 +65,11 @@ fn get_ready_for_batch(db: &HcomDb, batch_id: &str) -> (i64, Vec<String>) {
         Ok(s) => s,
         Err(_) => return (0, vec![]),
     };
-    let instances: Vec<String> = match stmt
-        .query_map(rusqlite::params![batch_id], |row| row.get::<_, String>(0))
-    {
-        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-        Err(_) => vec![],
-    };
+    let instances: Vec<String> =
+        match stmt.query_map(rusqlite::params![batch_id], |row| row.get::<_, String>(0)) {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(_) => vec![],
+        };
     let count = instances.len() as i64;
     (count, instances)
 }
@@ -89,7 +88,10 @@ fn aggregate_batches(batches: &[BatchInfo], launcher: &str) -> LaunchData {
         ready: total_ready,
         instances: all_instances,
         launcher: launcher.to_string(),
-        timestamp: batches.first().map(|b| b.timestamp.clone()).unwrap_or_default(),
+        timestamp: batches
+            .first()
+            .map(|b| b.timestamp.clone())
+            .unwrap_or_default(),
         batch_id: None,
         batches: Some(batch_ids),
     }
@@ -209,11 +211,17 @@ fn get_launch_status(db: &HcomDb, launcher: Option<&str>) -> Option<LaunchData> 
         .filter(|b| b.ready < b.expected && ts_epoch(&b.timestamp) > cutoff)
         .collect();
     if !pending.is_empty() {
-        let owned: Vec<BatchInfo> = pending.into_iter().map(|b| BatchInfo {
-            batch_id: b.batch_id.clone(), launcher: b.launcher.clone(),
-            expected: b.expected, ready: b.ready,
-            instances: b.instances.clone(), timestamp: b.timestamp.clone(),
-        }).collect();
+        let owned: Vec<BatchInfo> = pending
+            .into_iter()
+            .map(|b| BatchInfo {
+                batch_id: b.batch_id.clone(),
+                launcher: b.launcher.clone(),
+                expected: b.expected,
+                ready: b.ready,
+                instances: b.instances.clone(),
+                timestamp: b.timestamp.clone(),
+            })
+            .collect();
         return Some(aggregate_batches(&owned, &effective_launcher));
     }
 
@@ -223,11 +231,17 @@ fn get_launch_status(db: &HcomDb, launcher: Option<&str>) -> Option<LaunchData> 
         .filter(|b| ts_epoch(&b.timestamp) > cutoff)
         .collect();
     if !recent.is_empty() {
-        let owned: Vec<BatchInfo> = recent.into_iter().map(|b| BatchInfo {
-            batch_id: b.batch_id.clone(), launcher: b.launcher.clone(),
-            expected: b.expected, ready: b.ready,
-            instances: b.instances.clone(), timestamp: b.timestamp.clone(),
-        }).collect();
+        let owned: Vec<BatchInfo> = recent
+            .into_iter()
+            .map(|b| BatchInfo {
+                batch_id: b.batch_id.clone(),
+                launcher: b.launcher.clone(),
+                expected: b.expected,
+                ready: b.ready,
+                instances: b.instances.clone(),
+                timestamp: b.timestamp.clone(),
+            })
+            .collect();
         return Some(aggregate_batches(&owned, &effective_launcher));
     }
 
@@ -252,8 +266,9 @@ fn get_launch_batch(db: &HcomDb, batch_id: &str) -> Option<LaunchData> {
     let conn = db.conn();
 
     // Get aggregated launch info for this batch_id prefix
-    let mut stmt = conn.prepare(
-        "SELECT MIN(timestamp) as timestamp, \
+    let mut stmt = conn
+        .prepare(
+            "SELECT MIN(timestamp) as timestamp, \
                 instance as launcher, \
                 json_extract(data, '$.batch_id') as batch_id, \
                 SUM(json_extract(data, '$.launched')) as expected \
@@ -262,7 +277,8 @@ fn get_launch_batch(db: &HcomDb, batch_id: &str) -> Option<LaunchData> {
            AND json_extract(data, '$.action') = 'batch_launched' \
            AND json_extract(data, '$.batch_id') LIKE ?1 \
          GROUP BY json_extract(data, '$.batch_id')",
-    ).ok()?;
+        )
+        .ok()?;
 
     let like_pattern = format!("{}%", batch_id);
     let row: Option<(String, String, String, i64)> = stmt

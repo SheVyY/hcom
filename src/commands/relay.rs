@@ -1,18 +1,10 @@
 //! `hcom relay` command — cross-device sync via MQTT pub/sub.
-//!
-//!
-//! Subcommands: new, connect, disconnect/off, status.
-//! Token encode/decode for sharing relay groups between devices.
-//!
-//! Note: relay new/connect invoke broker discovery and TLS testing.
-//! The relay-worker process management (Phase 1.5) may not yet be complete,
-//! so some features degrade gracefully.
 
 use crate::config;
 use crate::db::HcomDb;
 use crate::relay::{self, DEFAULT_BROKERS};
 use crate::shared::CommandContext;
-use crate::shared::constants::{FG_GREEN, FG_RED, FG_YELLOW, FG_GRAY, RESET};
+use crate::shared::ansi::{FG_GRAY, FG_GREEN, FG_RED, FG_YELLOW, RESET};
 
 /// Parsed arguments for `hcom relay`.
 #[derive(clap::Parser, Debug)]
@@ -73,7 +65,7 @@ fn format_time(timestamp: f64) -> String {
     if timestamp == 0.0 {
         return "never".to_string();
     }
-    let now = crate::shared::constants::now_epoch_f64();
+    let now = crate::shared::time::now_epoch_f64();
     let age = (now - timestamp) as i64;
     if age <= 0 {
         return "just now".to_string();
@@ -105,15 +97,30 @@ fn relay_status(db: &HcomDb) -> i32 {
 
     // Show MQTT connection state from kv store
     let relay_status_val = db.kv_get("relay_status").ok().flatten().unwrap_or_default();
-    let relay_error = db.kv_get("relay_last_error").ok().flatten().unwrap_or_default();
+    let relay_error = db
+        .kv_get("relay_last_error")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
 
     match relay_status_val.as_str() {
         "ok" => println!("Status:    {FG_GREEN}connected{RESET}"),
         "error" => {
-            println!("Status:    {FG_RED}error{RESET} — {}", if relay_error.is_empty() { "unknown" } else { &relay_error });
-            if relay_error.contains("password") || relay_error.contains("auth") || relay_error.contains("not authorized") {
+            println!(
+                "Status:    {FG_RED}error{RESET} — {}",
+                if relay_error.is_empty() {
+                    "unknown"
+                } else {
+                    &relay_error
+                }
+            );
+            if relay_error.contains("password")
+                || relay_error.contains("auth")
+                || relay_error.contains("not authorized")
+            {
                 let is_public = DEFAULT_BROKERS.iter().any(|&(h, p)| {
-                    config.relay == format!("mqtts://{h}:{p}") || config.relay == format!("mqtt://{h}:{p}")
+                    config.relay == format!("mqtts://{h}:{p}")
+                        || config.relay == format!("mqtt://{h}:{p}")
                 });
                 if !is_public && config.relay_token.is_empty() {
                     println!("  Hint: use --password when connecting to private brokers");
@@ -179,7 +186,7 @@ fn relay_status(db: &HcomDb) -> i32 {
     // Remote devices from KV
     // Uses relay_short_{short_id} → device_id + relay_sync_time_{device_id} freshness.
     let own_device = crate::relay::read_device_uuid();
-    let now = crate::shared::constants::now_epoch_f64();
+    let now = crate::shared::time::now_epoch_f64();
     let max_age = 90.0;
 
     // relay_short_{short_id} → device_id (invert to device_id → short_id)
@@ -270,15 +277,18 @@ fn relay_toggle(db: &HcomDb, enable: bool) -> i32 {
     }
 
     // Clear retained MQTT state before disabling so remote devices stop seeing us
-    if !enable && config.relay_enabled
-        && crate::relay::client::clear_retained_state(&config) {
+    if !enable && config.relay_enabled && crate::relay::client::clear_retained_state(&config) {
         println!("Cleared remote state");
     }
 
     // Update config file
     let config_path = crate::paths::config_toml_path();
     if let Ok(content) = std::fs::read_to_string(&config_path) {
-        let new_content = update_toml_key(&content, "relay_enabled", if enable { "true" } else { "false" });
+        let new_content = update_toml_key(
+            &content,
+            "relay_enabled",
+            if enable { "true" } else { "false" },
+        );
         if let Err(e) = std::fs::write(&config_path, &new_content) {
             eprintln!("Error: Failed to write config: {e}");
             return 1;
@@ -392,10 +402,7 @@ fn relay_new(db: &HcomDb, argv: &[String]) -> i32 {
 fn relay_connect(db: &HcomDb, argv: &[String]) -> i32 {
     let (broker_url, auth_token, remaining) = parse_broker_flags(argv);
 
-    let token_str = remaining
-        .first()
-        .filter(|s| !s.starts_with("-"))
-        .cloned();
+    let token_str = remaining.first().filter(|s| !s.starts_with("-")).cloned();
 
     if token_str.is_none() {
         // Re-enable mode
@@ -463,7 +470,8 @@ fn relay_connect(db: &HcomDb, argv: &[String]) -> i32 {
         println!("Password: set");
     } else {
         let is_public = DEFAULT_BROKERS.iter().any(|&(h, p)| {
-            effective_broker == format!("mqtts://{h}:{p}") || effective_broker == format!("mqtt://{h}:{p}")
+            effective_broker == format!("mqtts://{h}:{p}")
+                || effective_broker == format!("mqtt://{h}:{p}")
         });
         if !is_public {
             println!("Password: not set (use --password if broker requires auth)");

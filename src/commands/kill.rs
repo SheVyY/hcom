@@ -42,10 +42,16 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     let mut filtered = vec!["kill".to_string()];
     let mut skip_next = false;
     for arg in argv {
-        if skip_next { skip_next = false; continue; }
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
         match arg.as_str() {
             "kill" | "--go" => continue,
-            "--name" => { skip_next = true; continue; }
+            "--name" => {
+                skip_next = true;
+                continue;
+            }
             _ => filtered.push(arg.clone()),
         }
     }
@@ -53,12 +59,17 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     use clap::Parser;
     let kill_args = match KillArgs::try_parse_from(&filtered) {
         Ok(a) => a,
-        Err(e) => { e.print().ok(); return Ok(if e.use_stderr() { 1 } else { 0 }); }
+        Err(e) => {
+            e.print().ok();
+            return Ok(if e.use_stderr() { 1 } else { 0 });
+        }
     };
 
     let targets = kill_args.targets;
     if targets.is_empty() {
-        eprintln!("Error: no target specified\n\nUsage: kill <TARGET>...\n\nFor more information, try '--help'.");
+        eprintln!(
+            "Error: no target specified\n\nUsage: kill <TARGET>...\n\nFor more information, try '--help'."
+        );
         return Ok(1);
     }
     let explicit_name = flags.name.clone();
@@ -121,20 +132,34 @@ fn kill_all(db: &HcomDb, hcom_dir: &std::path::Path, initiator: &str) -> Result<
         if let Some(pid) = inst.pid {
             active_pids.insert(pid as u32);
             let is_headless = inst.background != 0;
-            let (result, pane_closed, preset_name, pane_id) =
-                kill_instance(db, &inst.name, pid as u32, &inst.launch_context, is_headless);
+            let (result, pane_closed, preset_name, pane_id) = kill_instance(
+                db,
+                &inst.name,
+                pid as u32,
+                &inst.launch_context,
+                is_headless,
+            );
             let pane_info = pane_info_str(pane_closed, &preset_name, &pane_id);
             match result {
                 terminal::KillResult::Sent => {
-                    println!("Sent SIGTERM to process group {} for '{}'{}", pid, inst.name, pane_info);
+                    println!(
+                        "Sent SIGTERM to process group {} for '{}'{}",
+                        pid, inst.name, pane_info
+                    );
                     killed += 1;
                 }
                 terminal::KillResult::AlreadyDead => {
-                    println!("Process group {} not found for '{}' (already terminated){}", pid, inst.name, pane_info);
+                    println!(
+                        "Process group {} not found for '{}' (already terminated){}",
+                        pid, inst.name, pane_info
+                    );
                     killed += 1;
                 }
                 terminal::KillResult::PermissionDenied => {
-                    eprintln!("Permission denied to kill process group {} for '{}'", pid, inst.name);
+                    eprintln!(
+                        "Permission denied to kill process group {} for '{}'",
+                        pid, inst.name
+                    );
                     failed += 1;
                 }
             }
@@ -151,8 +176,12 @@ fn kill_all(db: &HcomDb, hcom_dir: &std::path::Path, initiator: &str) -> Result<
     let orphans = pidtrack::get_orphan_processes(hcom_dir, Some(&active_pids));
     for orphan in &orphans {
         let (result, pane_closed) = terminal::kill_process(
-            orphan.pid, &orphan.terminal_preset, &orphan.pane_id,
-            &orphan.process_id, &orphan.kitty_listen_on, &orphan.terminal_id,
+            orphan.pid,
+            &orphan.terminal_preset,
+            &orphan.pane_id,
+            &orphan.process_id,
+            &orphan.kitty_listen_on,
+            &orphan.terminal_id,
         );
         let names = orphan.names.join(", ");
         let pane_info = pane_info_str(pane_closed, &orphan.terminal_preset, &orphan.pane_id);
@@ -163,11 +192,17 @@ fn kill_all(db: &HcomDb, hcom_dir: &std::path::Path, initiator: &str) -> Result<
         };
         match result {
             terminal::KillResult::Sent => {
-                println!("Sent SIGTERM to orphan process group {}{}", orphan.pid, label);
+                println!(
+                    "Sent SIGTERM to orphan process group {}{}",
+                    orphan.pid, label
+                );
                 killed += 1;
             }
             terminal::KillResult::AlreadyDead => {
-                println!("Orphan process group {} already terminated{}", orphan.pid, label);
+                println!(
+                    "Orphan process group {} already terminated{}",
+                    orphan.pid, label
+                );
             }
             terminal::KillResult::PermissionDenied => {
                 failed += 1;
@@ -194,9 +229,7 @@ fn kill_by_tag(db: &HcomDb, hcom_dir: &std::path::Path, tag: &str, initiator: &s
     let instances = db.iter_instances_full()?;
     let tagged: Vec<_> = instances
         .iter()
-        .filter(|inst| {
-            inst.tag.as_deref() == Some(tag) && inst.origin_device_id.is_none()
-        })
+        .filter(|inst| inst.tag.as_deref() == Some(tag) && inst.origin_device_id.is_none())
         .collect();
 
     let mut killed = 0;
@@ -206,49 +239,75 @@ fn kill_by_tag(db: &HcomDb, hcom_dir: &std::path::Path, tag: &str, initiator: &s
     for inst in &tagged {
         if let Some(pid) = inst.pid {
             let is_headless = inst.background != 0;
-            let (result, pane_closed, preset_name, pane_id) =
-                kill_instance(db, &inst.name, pid as u32, &inst.launch_context, is_headless);
+            let (result, pane_closed, preset_name, pane_id) = kill_instance(
+                db,
+                &inst.name,
+                pid as u32,
+                &inst.launch_context,
+                is_headless,
+            );
             let pane_info = pane_info_str(pane_closed, &preset_name, &pane_id);
             match result {
                 terminal::KillResult::Sent => {
-                    println!("Sent SIGTERM to process group {} for '{}'{}", pid, inst.name, pane_info);
+                    println!(
+                        "Sent SIGTERM to process group {} for '{}'{}",
+                        pid, inst.name, pane_info
+                    );
                     killed += 1;
                 }
                 terminal::KillResult::AlreadyDead => {
-                    println!("Process group {} already terminated for '{}'", pid, inst.name);
+                    println!(
+                        "Process group {} already terminated for '{}'",
+                        pid, inst.name
+                    );
                 }
                 terminal::KillResult::PermissionDenied => {
-                    eprintln!("Permission denied to kill process group {} for '{}'", pid, inst.name);
+                    eprintln!(
+                        "Permission denied to kill process group {} for '{}'",
+                        pid, inst.name
+                    );
                     failed += 1;
                 }
             }
             stop_instance(db, &inst.name, initiator, "killed");
         } else {
-            // No PID tracked — print error, don't print resume tip
-            eprintln!("Cannot kill {} - no tracked process. Use hcom stop instead.", inst.name);
-            failed += 1;
+            // No PID tracked — clean up DB entry
+            println!("No tracked process for '{}', stopping instance.", inst.name);
             stop_instance(db, &inst.name, initiator, "killed");
         }
     }
 
     // Also kill orphan processes with this tag (stopped but still running)
-    let active_pids: HashSet<u32> = tagged.iter().filter_map(|i| i.pid.map(|p| p as u32)).collect();
+    let active_pids: HashSet<u32> = tagged
+        .iter()
+        .filter_map(|i| i.pid.map(|p| p as u32))
+        .collect();
     let orphans = pidtrack::get_orphan_processes(hcom_dir, Some(&active_pids));
     let tagged_orphans: Vec<_> = orphans.iter().filter(|o| o.tag == tag).collect();
     for orphan in &tagged_orphans {
         let names = orphan.names.join(", ");
         let (result, pane_closed) = terminal::kill_process(
-            orphan.pid, &orphan.terminal_preset, &orphan.pane_id,
-            &orphan.process_id, &orphan.kitty_listen_on, &orphan.terminal_id,
+            orphan.pid,
+            &orphan.terminal_preset,
+            &orphan.pane_id,
+            &orphan.process_id,
+            &orphan.kitty_listen_on,
+            &orphan.terminal_id,
         );
         let pane_info = pane_info_str(pane_closed, &orphan.terminal_preset, &orphan.pane_id);
         match result {
             terminal::KillResult::Sent => {
-                println!("Sent SIGTERM to stopped process group {} for '{}'{}", orphan.pid, names, pane_info);
+                println!(
+                    "Sent SIGTERM to stopped process group {} for '{}'{}",
+                    orphan.pid, names, pane_info
+                );
                 killed += 1;
             }
             terminal::KillResult::AlreadyDead => {
-                println!("Process group {} already terminated for '{}'", orphan.pid, names);
+                println!(
+                    "Process group {} already terminated for '{}'",
+                    orphan.pid, names
+                );
             }
             terminal::KillResult::PermissionDenied => {
                 eprintln!("Permission denied to kill process group {}", orphan.pid);
@@ -268,10 +327,14 @@ fn kill_by_tag(db: &HcomDb, hcom_dir: &std::path::Path, tag: &str, initiator: &s
 }
 
 /// Kill a single instance by name.
-fn kill_single(db: &HcomDb, hcom_dir: &std::path::Path, target: &str, initiator: &str) -> Result<i32> {
+fn kill_single(
+    db: &HcomDb,
+    hcom_dir: &std::path::Path,
+    target: &str,
+    initiator: &str,
+) -> Result<i32> {
     // Resolve display name
-    let name = instances::resolve_display_name(db, target)
-        .unwrap_or_else(|| target.to_string());
+    let name = instances::resolve_display_name(db, target).unwrap_or_else(|| target.to_string());
 
     let inst = match db.get_instance_full(&name)? {
         Some(inst) => inst,
@@ -286,16 +349,27 @@ fn kill_single(db: &HcomDb, hcom_dir: &std::path::Path, target: &str, initiator:
                     || target_pid == Some(o.pid)
             }) {
                 let (result, pane_closed) = terminal::kill_process(
-                    orphan.pid, &orphan.terminal_preset, &orphan.pane_id,
-                    &orphan.process_id, &orphan.kitty_listen_on, &orphan.terminal_id,
+                    orphan.pid,
+                    &orphan.terminal_preset,
+                    &orphan.pane_id,
+                    &orphan.process_id,
+                    &orphan.kitty_listen_on,
+                    &orphan.terminal_id,
                 );
-                let pane_info = pane_info_str(pane_closed, &orphan.terminal_preset, &orphan.pane_id);
+                let pane_info =
+                    pane_info_str(pane_closed, &orphan.terminal_preset, &orphan.pane_id);
                 match result {
                     terminal::KillResult::Sent => {
-                        println!("Sent SIGTERM to process group {} for stopped instance '{}'{}", orphan.pid, target, pane_info);
+                        println!(
+                            "Sent SIGTERM to process group {} for stopped instance '{}'{}",
+                            orphan.pid, target, pane_info
+                        );
                     }
                     terminal::KillResult::AlreadyDead => {
-                        println!("Process group {} not found for '{}' (already terminated){}", orphan.pid, target, pane_info);
+                        println!(
+                            "Process group {} not found for '{}' (already terminated){}",
+                            orphan.pid, target, pane_info
+                        );
                     }
                     terminal::KillResult::PermissionDenied => {
                         eprintln!("Permission denied to kill process group {}", orphan.pid);
@@ -311,7 +385,11 @@ fn kill_single(db: &HcomDb, hcom_dir: &std::path::Path, target: &str, initiator:
 
     let pid = match inst.pid {
         Some(pid) => pid as u32,
-        None => bail!("No tracked PID for '{}' — use 'hcom stop {}' instead", name, name),
+        None => bail!(
+            "No tracked PID for '{}' — use 'hcom stop {}' instead",
+            name,
+            name
+        ),
     };
 
     let is_headless = inst.background != 0;
@@ -322,17 +400,26 @@ fn kill_single(db: &HcomDb, hcom_dir: &std::path::Path, target: &str, initiator:
     let pane_info = pane_info_str(pane_closed, &preset_name, &pane_id);
     match result {
         terminal::KillResult::Sent => {
-            println!("Sent SIGTERM to process group {} for '{}'{}", pid, name, pane_info);
+            println!(
+                "Sent SIGTERM to process group {} for '{}'{}",
+                pid, name, pane_info
+            );
             println!("  To resume: hcom r {}", name);
             Ok(0)
         }
         terminal::KillResult::AlreadyDead => {
-            println!("Process group {} not found for '{}' (already terminated){}", pid, name, pane_info);
+            println!(
+                "Process group {} not found for '{}' (already terminated){}",
+                pid, name, pane_info
+            );
             println!("  To resume: hcom r {}", name);
             Ok(0)
         }
         terminal::KillResult::PermissionDenied => {
-            eprintln!("Permission denied to kill process group {} for '{}'", pid, name);
+            eprintln!(
+                "Permission denied to kill process group {} for '{}'",
+                pid, name
+            );
             Ok(1)
         }
     }
@@ -353,12 +440,16 @@ fn kill_instance(
         log_info(
             "kill",
             "lifecycle.kill",
-            &format!("name={} pid={} result={:?} pane_closed={} headless=true", name, pid, result, pane_closed),
+            &format!(
+                "name={} pid={} result={:?} pane_closed={} headless=true",
+                name, pid, result, pane_closed
+            ),
         );
         return (result, pane_closed, String::new(), String::new());
     }
 
-    let ti = launch_context.as_deref()
+    let ti = launch_context
+        .as_deref()
         .map(terminal::resolve_terminal_info_from_launch_context)
         .unwrap_or_default();
 
@@ -374,10 +465,18 @@ fn kill_instance(
     log_info(
         "kill",
         "lifecycle.kill",
-        &format!("name={} pid={} result={:?} pane_closed={}", name, pid, result, pane_closed),
+        &format!(
+            "name={} pid={} result={:?} pane_closed={}",
+            name, pid, result, pane_closed
+        ),
     );
 
-    (result, pane_closed, ti.preset_name.clone(), ti.pane_id.clone())
+    (
+        result,
+        pane_closed,
+        ti.preset_name.clone(),
+        ti.pane_id.clone(),
+    )
 }
 
 #[cfg(test)]

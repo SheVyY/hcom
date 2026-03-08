@@ -12,6 +12,7 @@ pub enum Tool {
     Gemini,
     Codex,
     OpenCode,
+    Adhoc,
 }
 
 impl Tool {
@@ -30,6 +31,7 @@ impl Tool {
             // Gates delivery thread startup so PTY bootstrap inject doesn't fire
             // into a blank screen before the input box exists.
             Tool::OpenCode => b"ctrl+p commands",
+            Tool::Adhoc => b"",
         }
     }
 
@@ -42,6 +44,7 @@ impl Tool {
             Tool::Gemini => "gemini",
             Tool::Codex => "codex",
             Tool::OpenCode => "opencode",
+            Tool::Adhoc => "adhoc",
         }
     }
 }
@@ -55,6 +58,7 @@ impl FromStr for Tool {
             "gemini" => Ok(Tool::Gemini),
             "codex" => Ok(Tool::Codex),
             "opencode" => Ok(Tool::OpenCode),
+            "adhoc" => Ok(Tool::Adhoc),
             _ => Err(format!("Unknown tool: {}", s)),
         }
     }

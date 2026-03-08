@@ -82,14 +82,8 @@ fn parse_token(output: &str) -> Option<String> {
 
 fn parse_device_id(status_output: &str) -> Option<String> {
     for line in status_output.lines() {
-        if let Some(rest) = line.strip_prefix("  Device ID: ") {
-            return Some(rest.trim().to_string());
-        }
-        if line.contains("Device ID:") {
-            if let Some(pos) = line.find("Device ID:") {
-                let after = &line[pos + "Device ID:".len()..];
-                return Some(after.trim().to_string());
-            }
+        if line.starts_with("Device:") {
+            return Some(line["Device:".len()..].trim().to_string());
         }
     }
     None
@@ -142,7 +136,7 @@ impl Drop for RelayGuard {
             if let Some(d) = dir {
                 let d_str = d.to_string_lossy();
                 let _ = hcom_with_dir("relay off", &d_str);
-                let _ = hcom_with_dir("daemon stop", &d_str);
+                let _ = hcom_with_dir("relay daemon stop", &d_str);
                 kill_daemon(&d_str);
                 let _ = fs::remove_dir_all(d);
             }
@@ -187,7 +181,7 @@ fn test_relay_roundtrip() {
     eprintln!("  OK: Token: {}...", &token[..token.len().min(24)]);
 
     // Start daemon so relay actually connects to broker
-    check("A", "daemon start", &path_a);
+    check("A", "relay daemon start", &path_a);
     eprintln!("  OK: Device A daemon started");
 
     // Wait for connected
@@ -208,10 +202,8 @@ fn test_relay_roundtrip() {
     );
     eprintln!("  OK: Device A connected to broker");
 
-    let status_a = String::from_utf8_lossy(
-        &hcom_with_dir("relay status", &path_a).stdout,
-    )
-    .to_string();
+    let status_a =
+        String::from_utf8_lossy(&hcom_with_dir("relay status", &path_a).stdout).to_string();
     let short_a = parse_device_id(&status_a).expect("Could not parse Device A short ID");
     eprintln!("  OK: Device A short ID: {short_a}");
 
@@ -219,7 +211,11 @@ fn test_relay_roundtrip() {
     eprintln!("\n[Phase 2] Device A: sending test message...");
 
     let marker = format!("relay-rt-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    check("A", &format!("send --from relaytest -- \"{marker}\""), &path_a);
+    check(
+        "A",
+        &format!("send --from relaytest -- \"{marker}\""),
+        &path_a,
+    );
     eprintln!("  OK: Sent: {marker}");
 
     poll_until(
@@ -231,7 +227,13 @@ fn test_relay_roundtrip() {
                 if lower.contains("up to date") {
                     return Some(());
                 }
-                eprintln!("    relay status: {}", stdout.lines().find(|l| l.to_lowercase().contains("queue")).unwrap_or("(no queue line)"));
+                eprintln!(
+                    "    relay status: {}",
+                    stdout
+                        .lines()
+                        .find(|l| l.to_lowercase().contains("queue"))
+                        .unwrap_or("(no queue line)")
+                );
             }
             None
         },
@@ -249,7 +251,7 @@ fn test_relay_roundtrip() {
     eprintln!();
 
     // Start daemon so relay actually connects to broker
-    check("B", "daemon start", &path_b);
+    check("B", "relay daemon start", &path_b);
     eprintln!("  OK: Device B daemon started");
 
     poll_until(
@@ -276,7 +278,10 @@ fn test_relay_roundtrip() {
         || {
             let out = hcom_with_dir("events --last 50", &path_b);
             if !out.status.success() {
-                eprintln!("    events cmd failed: {}", String::from_utf8_lossy(&out.stderr));
+                eprintln!(
+                    "    events cmd failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
                 return None;
             }
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -343,10 +348,8 @@ fn test_relay_roundtrip() {
     // ── Phase 5: Device A sees Device B as remote ────────────────
     eprintln!("\n[Phase 5] Device A: checking for Device B as remote...");
 
-    let status_b = String::from_utf8_lossy(
-        &hcom_with_dir("relay status", &path_b).stdout,
-    )
-    .to_string();
+    let status_b =
+        String::from_utf8_lossy(&hcom_with_dir("relay status", &path_b).stdout).to_string();
     let short_b = parse_device_id(&status_b).expect("Could not parse Device B short ID");
     eprintln!("  OK: Device B short ID: {short_b}");
 
@@ -363,8 +366,13 @@ fn test_relay_roundtrip() {
                 }
             }
             // Debug: show what relay status says about remote devices
-            let remote_line = stdout.lines().find(|l| l.contains("Remote") || l.contains("other devices"));
-            eprintln!("    relay status: {}", remote_line.unwrap_or("(no remote line)"));
+            let remote_line = stdout
+                .lines()
+                .find(|l| l.contains("Remote") || l.contains("other devices"));
+            eprintln!(
+                "    relay status: {}",
+                remote_line.unwrap_or("(no remote line)")
+            );
             None
         },
         &format!("Device A sees {short_b} in remote devices"),

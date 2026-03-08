@@ -9,38 +9,35 @@ use crate::db::HcomDb;
 use crate::instances;
 use crate::log;
 
-// ==================== Tool Name Mappings ====================
-
 /// Map tool categories to specific tool names, per AI tool.
 ///
 /// Used by extract_tool_detail() to determine what detail to show
 /// in status display for each tool invocation.
 ///
-pub static TOOL_NAME_MAPPINGS: LazyLock<HashMap<&'static str, HashMap<&'static str, Vec<&'static str>>>> =
-    LazyLock::new(|| {
-        let mut m = HashMap::new();
+pub static TOOL_NAME_MAPPINGS: LazyLock<
+    HashMap<&'static str, HashMap<&'static str, Vec<&'static str>>>,
+> = LazyLock::new(|| {
+    let mut m = HashMap::new();
 
-        let mut claude = HashMap::new();
-        claude.insert("bash", vec!["Bash"]);
-        claude.insert("file", vec!["Write", "Edit"]);
-        claude.insert("delegate", vec!["Task"]);
-        m.insert("claude", claude);
+    let mut claude = HashMap::new();
+    claude.insert("bash", vec!["Bash"]);
+    claude.insert("file", vec!["Write", "Edit"]);
+    claude.insert("delegate", vec!["Task"]);
+    m.insert("claude", claude);
 
-        let mut gemini = HashMap::new();
-        gemini.insert("bash", vec!["run_shell_command"]);
-        gemini.insert("file", vec!["write_file", "replace"]);
-        gemini.insert("delegate", vec!["delegate_to_agent"]);
-        m.insert("gemini", gemini);
+    let mut gemini = HashMap::new();
+    gemini.insert("bash", vec!["run_shell_command"]);
+    gemini.insert("file", vec!["write_file", "replace"]);
+    gemini.insert("delegate", vec!["delegate_to_agent"]);
+    m.insert("gemini", gemini);
 
-        let mut codex = HashMap::new();
-        codex.insert("bash", vec!["execute_command", "shell", "shell_command"]);
-        codex.insert("file", vec!["apply_patch"]);
-        m.insert("codex", codex);
+    let mut codex = HashMap::new();
+    codex.insert("bash", vec!["execute_command", "shell", "shell_command"]);
+    codex.insert("file", vec!["apply_patch"]);
+    m.insert("codex", codex);
 
-        m
-    });
-
-// ==================== Tool Detail Extraction (1A.8) ====================
+    m
+});
 
 /// Extract human-readable detail from tool input for status display.
 ///
@@ -48,11 +45,7 @@ pub static TOOL_NAME_MAPPINGS: LazyLock<HashMap<&'static str, HashMap<&'static s
 /// Returns the relevant field (command for bash, file_path for file ops,
 /// prompt for delegate) or empty string if tool not recognized.
 ///
-pub fn extract_tool_detail(
-    tool: &str,
-    tool_name: &str,
-    tool_input: &serde_json::Value,
-) -> String {
+pub fn extract_tool_detail(tool: &str, tool_name: &str, tool_input: &serde_json::Value) -> String {
     let Some(mappings) = TOOL_NAME_MAPPINGS.get(tool) else {
         return String::new();
     };
@@ -84,8 +77,6 @@ pub fn extract_tool_detail(
     String::new()
 }
 
-// ==================== Vanilla Binding (1A.10) ====================
-
 /// Persist vanilla instance binding (session + transcript + tool).
 ///
 /// Called after marker extraction (each tool extracts differently).
@@ -105,10 +96,7 @@ pub fn bind_vanilla_instance(
 
     let result: Result<(), anyhow::Error> = (|| {
         let mut updates = serde_json::Map::new();
-        updates.insert(
-            "tool".into(),
-            serde_json::Value::String(tool.to_string()),
-        );
+        updates.insert("tool".into(), serde_json::Value::String(tool.to_string()));
 
         if let Some(sid) = session_id {
             updates.insert(
@@ -129,10 +117,7 @@ pub fn bind_vanilla_instance(
         log::log_info(
             "hooks",
             &format!("{}.bind.success", tool),
-            &format!(
-                "instance={} session_id={:?}",
-                instance_name, session_id
-            ),
+            &format!("instance={} session_id={:?}", instance_name, session_id),
         );
         Ok(())
     })();
@@ -233,8 +218,6 @@ mod tests {
         assert_eq!(extract_tool_detail("claude", "Bash", &input), "");
     }
 
-    // ---------- bind_vanilla_instance ----------
-
     fn make_test_db() -> (tempfile::TempDir, crate::db::HcomDb) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
@@ -257,11 +240,15 @@ mod tests {
         let (_dir, db) = make_test_db();
         insert_test_instance(&db, "luna");
 
-        let result = bind_vanilla_instance(&db, "luna", Some("sess-v1"), None, "claude", "PostToolUse");
+        let result =
+            bind_vanilla_instance(&db, "luna", Some("sess-v1"), None, "claude", "PostToolUse");
         assert_eq!(result, Some("luna".to_string()));
 
         // Session binding should be created
-        assert_eq!(db.get_session_binding("sess-v1").unwrap(), Some("luna".to_string()));
+        assert_eq!(
+            db.get_session_binding("sess-v1").unwrap(),
+            Some("luna".to_string())
+        );
 
         // Instance should have session_id set
         let inst = db.get_instance_full("luna").unwrap().unwrap();
@@ -274,7 +261,14 @@ mod tests {
         let (_dir, db) = make_test_db();
         insert_test_instance(&db, "nova");
 
-        let result = bind_vanilla_instance(&db, "nova", None, Some("/tmp/transcript.jsonl"), "gemini", "AfterTool");
+        let result = bind_vanilla_instance(
+            &db,
+            "nova",
+            None,
+            Some("/tmp/transcript.jsonl"),
+            "gemini",
+            "AfterTool",
+        );
         assert_eq!(result, Some("nova".to_string()));
 
         // Instance should have transcript_path and tool updated
@@ -294,9 +288,10 @@ mod tests {
         assert_eq!(result, Some("miso".to_string()));
 
         // No session binding should exist
-        let bindings: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM session_bindings", [], |r| r.get(0)
-        ).unwrap();
+        let bindings: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM session_bindings", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(bindings, 0);
     }
 
@@ -307,11 +302,19 @@ mod tests {
         insert_test_instance(&db, "kira");
 
         let result = bind_vanilla_instance(
-            &db, "kira", Some("sess-v2"), Some("/tmp/t2.jsonl"), "codex", "PostToolUse"
+            &db,
+            "kira",
+            Some("sess-v2"),
+            Some("/tmp/t2.jsonl"),
+            "codex",
+            "PostToolUse",
         );
         assert_eq!(result, Some("kira".to_string()));
 
-        assert_eq!(db.get_session_binding("sess-v2").unwrap(), Some("kira".to_string()));
+        assert_eq!(
+            db.get_session_binding("sess-v2").unwrap(),
+            Some("kira".to_string())
+        );
         let inst = db.get_instance_full("kira").unwrap().unwrap();
         assert_eq!(inst.session_id.as_deref(), Some("sess-v2"));
         assert_eq!(inst.transcript_path, "/tmp/t2.jsonl");

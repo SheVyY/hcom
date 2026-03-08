@@ -17,6 +17,7 @@ use crate::log::{log_error, log_info, log_warn};
 const CLAUDE_HOOKS: &[&str] = &[
     "poll",
     "notify",
+    "permission-request",
     "pre",
     "post",
     "sessionstart",
@@ -127,11 +128,15 @@ pub struct GlobalFlags {
 // hooks appear as bare subcommands (`hcom sessionstart`), launch commands can
 // start with a numeric count (`hcom 3 claude`), and ~40 hook/command/tool names
 // need classification. clap will be used for per-command arg parsing as commands
-// are ported to Rust (Phase 2).
+// are ported to Rust.
 
 /// Clap parser for global flags only. Remaining args collected as positionals.
 #[derive(Parser, Debug)]
-#[command(no_binary_name = true, disable_help_flag = true, disable_version_flag = true)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct GlobalFlagParser {
     /// Instance name for identity
     #[arg(long)]
@@ -430,10 +435,7 @@ pub fn dispatch() -> anyhow::Result<()> {
     // Check for updates on CLI commands (not hooks/pty/relay — those need to be fast/silent)
     if matches!(
         action,
-        Action::Command { .. }
-            | Action::Launch { .. }
-            | Action::Version
-            | Action::Help
+        Action::Command { .. } | Action::Launch { .. } | Action::Version | Action::Help
     ) {
         if let Some(notice) = crate::update::get_update_notice() {
             eprintln!("{notice}");
@@ -455,15 +457,14 @@ pub fn dispatch() -> anyhow::Result<()> {
         }
         Action::Hook { ref hook, ref args } if hook == "codex-notify" => {
             // Codex notify hook — handled natively in Rust.
-            let exit_code = crate::hooks::codex::handle_codex_notify(args);
+            let exit_code = crate::hooks::codex::dispatch_codex_hook(args);
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }
         }
         Action::Hook { ref hook, ref args } if OPENCODE_HOOKS.contains(&hook.as_str()) => {
-            // OpenCode hooks handled natively in Rust (Phase 1C).
-            let (exit_code, output) =
-                crate::hooks::opencode::dispatch_opencode_hook(hook, args);
+            // OpenCode hooks handled natively in Rust.
+            let (exit_code, output) = crate::hooks::opencode::dispatch_opencode_hook(hook, args);
             if !output.is_empty() {
                 print!("{}", output);
             }
@@ -472,21 +473,21 @@ pub fn dispatch() -> anyhow::Result<()> {
             }
         }
         Action::Hook { ref hook, .. } if GEMINI_HOOKS.contains(&hook.as_str()) => {
-            // Gemini hooks handled natively in Rust (Phase 1D).
+            // Gemini hooks handled natively in Rust.
             let exit_code = crate::hooks::gemini::dispatch_gemini_hook(hook);
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }
         }
         Action::Hook { ref hook, .. } if CLAUDE_HOOKS.contains(&hook.as_str()) => {
-            // Claude hooks — handled natively in Rust (Phase 1E).
-            let exit_code = crate::hooks::claude::handle_claude_hook(hook);
+            // Claude hooks handled natively in Rust.
+            let exit_code = crate::hooks::claude::dispatch_claude_hook(hook);
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }
         }
         Action::Launch { ref args } => {
-            // Launch/resume/fork handled natively (Phase 2B).
+            // Launch/resume/fork handled natively.
             let (stripped, flags, help) = extract_global_flags_full(args);
             let first_cmd = stripped.first().map(|s| s.as_str()).unwrap_or("");
             // Skip numeric count prefix
@@ -508,9 +509,7 @@ pub fn dispatch() -> anyhow::Result<()> {
                 std::process::exit(exit_code);
             }
         }
-        Action::Command { ref cmd, ref args }
-            if matches!(cmd.as_str(), "start" | "kill") =>
-        {
+        Action::Command { ref cmd, ref args } if matches!(cmd.as_str(), "start" | "kill") => {
             let (_, flags, help) = extract_global_flags_full(args);
             if help {
                 crate::commands::help::print_command_help(cmd);
@@ -525,11 +524,26 @@ pub fn dispatch() -> anyhow::Result<()> {
                 std::process::exit(exit_code);
             }
         }
-        Action::Command { ref cmd, ref args } if matches!(cmd.as_str(),
-            "send" | "list" | "stop" | "listen" |
-            "events" | "transcript" | "config" | "status" | "bundle" |
-            "archive" | "reset" | "hooks" | "term" | "relay" | "run"
-        ) => {
+        Action::Command { ref cmd, ref args }
+            if matches!(
+                cmd.as_str(),
+                "send"
+                    | "list"
+                    | "stop"
+                    | "listen"
+                    | "events"
+                    | "transcript"
+                    | "config"
+                    | "status"
+                    | "bundle"
+                    | "archive"
+                    | "reset"
+                    | "hooks"
+                    | "term"
+                    | "relay"
+                    | "run"
+            ) =>
+        {
             let exit_code = dispatch_native_command(cmd, args);
             if exit_code != 0 {
                 std::process::exit(exit_code);
@@ -589,9 +603,9 @@ fn launch_new_terminal() -> i32 {
         &exe,
         &env_vars,
         cwd.as_deref(),
-        false,     // not background
-        false,     // not run_here (open new window)
-        None,      // default terminal
+        false, // not background
+        false, // not run_here (open new window)
+        None,  // default terminal
         inside_ai,
     ) {
         Ok(crate::terminal::LaunchResult::Success) => 0,
@@ -609,7 +623,7 @@ fn launch_new_terminal() -> i32 {
 
 // ── Native command dispatch ──────────────────────────────────────────────
 
-/// Dispatch a natively-handled CLI command (Phase 2A Batch 1).
+/// Dispatch a natively-handled CLI command.
 ///
 /// Opens DB, builds CommandContext, calls the appropriate cmd_* function.
 /// Args are the full argv[1..] (includes the command name and global flags).
@@ -653,8 +667,12 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
     };
 
     // Build context (identity resolution, --go flag)
-    let process_id = std::env::var("HCOM_PROCESS_ID").ok().filter(|s| !s.is_empty());
-    let codex_thread_id = std::env::var("CODEX_THREAD_ID").ok().filter(|s| !s.is_empty());
+    let process_id = std::env::var("HCOM_PROCESS_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let codex_thread_id = std::env::var("CODEX_THREAD_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
     let ctx = match build_ctx_for_command(
         &db,
         Some(cmd),
@@ -673,7 +691,8 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
     // Identity gating: block unregistered sessions from gated commands
     let has_from_flag = cmd_argv.iter().any(|a| a == "--from" || a == "-b");
     let is_inside_ai = crate::shared::is_inside_ai_tool();
-    if let Err(e) = crate::cli_context::check_identity_gate(cmd, &ctx, has_from_flag, is_inside_ai) {
+    if let Err(e) = crate::cli_context::check_identity_gate(cmd, &ctx, has_from_flag, is_inside_ai)
+    {
         eprintln!("Error: {e}");
         return 1;
     }
@@ -684,7 +703,7 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
         && std::env::var("CLAUDE_CODE_ENTRYPOINT").is_ok()
     {
         if let Some(ref identity) = ctx.identity {
-            if crate::hooks::claude::in_subagent_context(&db, &identity.name) {
+            if crate::instances::in_subagent_context(&db, &identity.name) {
                 eprintln!(
                     "Error: Subagent context active - explicit identity required\n\
                      Use: hcom {cmd} --name parent (for parent) or --name <uuid> (for subagent)"
@@ -704,9 +723,7 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
     macro_rules! clap_parse {
         ($type:ty, $name:expr, $argv:expr) => {{
             use clap::Parser;
-            <$type>::try_parse_from(
-                std::iter::once($name.to_string()).chain($argv.iter().cloned())
-            )
+            <$type>::try_parse_from(std::iter::once($name.to_string()).chain($argv.iter().cloned()))
         }};
     }
 
@@ -714,50 +731,91 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
         ($type:ty, $name:expr, $argv:expr, $handler:expr) => {{
             match clap_parse!($type, $name, $argv) {
                 Ok(args) => $handler(args),
-                Err(e) => { e.print().ok(); if e.use_stderr() { 1 } else { 0 } }
+                Err(e) => {
+                    e.print().ok();
+                    if e.use_stderr() { 1 } else { 0 }
+                }
             }
         }};
     }
 
     let result = match cmd {
-        // Batch 1: Daily Use
-        "send" => {
-            match clap_parse!(crate::commands::send::SendArgs, cmd, &cmd_argv) {
-                Ok(mut args) => {
-                    args.had_separator = cmd_argv.iter().any(|a| a == "--");
-                    crate::commands::send::cmd_send(&db, &args, Some(&ctx))
-                }
-                Err(e) => { e.print().ok(); if e.use_stderr() { 1 } else { 0 } }
+        // Messaging
+        "send" => match clap_parse!(crate::commands::send::SendArgs, cmd, &cmd_argv) {
+            Ok(mut args) => {
+                args.had_separator = cmd_argv.iter().any(|a| a == "--");
+                crate::commands::send::cmd_send(&db, &args, Some(&ctx))
             }
-        }
-        "list" => clap_dispatch!(crate::commands::list::ListArgs, cmd, &cmd_argv,
-            |args| crate::commands::list::cmd_list(&db, &args, Some(&ctx))),
-        "stop" => clap_dispatch!(crate::commands::stop::StopArgs, cmd, &cmd_argv,
-            |args| crate::commands::stop::cmd_stop(&db, &args, Some(&ctx))),
-        "listen" => clap_dispatch!(crate::commands::listen::ListenArgs, cmd, &cmd_argv,
-            |args| crate::commands::listen::cmd_listen(&db, &args, Some(&ctx))),
-        // Batch 3: Secondary Commands
-        "events" => clap_dispatch!(crate::commands::events::EventsArgs, cmd, &cmd_argv,
-            |args| crate::commands::events::cmd_events(&db, &args, Some(&ctx))),
-        "transcript" => clap_dispatch!(crate::commands::transcript::TranscriptArgs, cmd, &cmd_argv,
-            |args| crate::commands::transcript::cmd_transcript(&db, &args, Some(&ctx))),
-        "config" => clap_dispatch!(crate::commands::config::ConfigArgs, cmd, &cmd_argv,
-            |args| crate::commands::config::cmd_config(&db, &args, Some(&ctx))),
-        "status" => clap_dispatch!(crate::commands::status::StatusArgs, cmd, &cmd_argv,
-            |args| crate::commands::status::cmd_status(&db, &args, Some(&ctx))),
-        "bundle" => clap_dispatch!(crate::commands::bundle::BundleArgs, cmd, &cmd_argv,
-            |args| crate::commands::bundle::cmd_bundle(&db, &args, Some(&ctx))),
-        // Batch 4: Remaining
-        "archive" => clap_dispatch!(crate::commands::archive::ArchiveArgs, cmd, &cmd_argv,
-            |args| crate::commands::archive::cmd_archive(&db, &args, Some(&ctx))),
-        "reset" => crate::commands::reset::cmd_reset(&db, &cmd_argv, Some(&ctx)),
-        "hooks" => clap_dispatch!(crate::commands::hooks::HooksArgs, cmd, &cmd_argv,
-            |args| crate::commands::hooks::cmd_hooks(&db, &args, Some(&ctx))),
-        "term" => clap_dispatch!(crate::commands::term::TermArgs, cmd, &cmd_argv,
-            |args| crate::commands::term::cmd_term(&db, &args, Some(&ctx))),
-        "relay" => clap_dispatch!(crate::commands::relay::RelayArgs, cmd, &cmd_argv,
-            |args| crate::commands::relay::cmd_relay(&db, &args, Some(&ctx))),
-        "run" => crate::commands::run::cmd_run(&db, &cmd_argv, Some(&ctx)),
+            Err(e) => {
+                e.print().ok();
+                if e.use_stderr() { 1 } else { 0 }
+            }
+        },
+        "list" => clap_dispatch!(crate::commands::list::ListArgs, cmd, &cmd_argv, |args| {
+            crate::commands::list::cmd_list(&db, &args, Some(&ctx))
+        }),
+        "stop" => clap_dispatch!(crate::commands::stop::StopArgs, cmd, &cmd_argv, |args| {
+            crate::commands::stop::cmd_stop(&db, &args, Some(&ctx))
+        }),
+        "listen" => clap_dispatch!(
+            crate::commands::listen::ListenArgs,
+            cmd,
+            &cmd_argv,
+            |args| crate::commands::listen::cmd_listen(&db, &args, Some(&ctx))
+        ),
+        // Diagnostics
+        "events" => clap_dispatch!(
+            crate::commands::events::EventsArgs,
+            cmd,
+            &cmd_argv,
+            |args| crate::commands::events::cmd_events(&db, &args, Some(&ctx))
+        ),
+        "transcript" => clap_dispatch!(
+            crate::commands::transcript::TranscriptArgs,
+            cmd,
+            &cmd_argv,
+            |args| crate::commands::transcript::cmd_transcript(&db, &args, Some(&ctx))
+        ),
+        "config" => clap_dispatch!(
+            crate::commands::config::ConfigArgs,
+            cmd,
+            &cmd_argv,
+            |args| crate::commands::config::cmd_config(&db, &args, Some(&ctx))
+        ),
+        "status" => clap_dispatch!(
+            crate::commands::status::StatusArgs,
+            cmd,
+            &cmd_argv,
+            |args| crate::commands::status::cmd_status(&db, &args, Some(&ctx))
+        ),
+        "bundle" => clap_dispatch!(
+            crate::commands::bundle::BundleArgs,
+            cmd,
+            &cmd_argv,
+            |args| crate::commands::bundle::cmd_bundle(&db, &args, Some(&ctx))
+        ),
+        // Management
+        "archive" => clap_dispatch!(
+            crate::commands::archive::ArchiveArgs,
+            cmd,
+            &cmd_argv,
+            |args| crate::commands::archive::cmd_archive(&db, &args, Some(&ctx))
+        ),
+        "reset" => clap_dispatch!(crate::commands::reset::ResetArgs, cmd, &cmd_argv, |args| {
+            crate::commands::reset::cmd_reset(&db, &args, Some(&ctx))
+        }),
+        "hooks" => clap_dispatch!(crate::commands::hooks::HooksArgs, cmd, &cmd_argv, |args| {
+            crate::commands::hooks::cmd_hooks(&db, &args, Some(&ctx))
+        }),
+        "term" => clap_dispatch!(crate::commands::term::TermArgs, cmd, &cmd_argv, |args| {
+            crate::commands::term::cmd_term(&db, &args, Some(&ctx))
+        }),
+        "relay" => clap_dispatch!(crate::commands::relay::RelayArgs, cmd, &cmd_argv, |args| {
+            crate::commands::relay::cmd_relay(&db, &args, Some(&ctx))
+        }),
+        "run" => clap_dispatch!(crate::commands::run::RunArgs, cmd, &cmd_argv, |args| {
+            crate::commands::run::cmd_run(&db, &args, Some(&ctx))
+        }),
         _ => {
             // Should never happen — only matched commands reach here
             eprintln!("Error: Unknown native command '{cmd}'");
@@ -793,13 +851,23 @@ mod tests {
     #[test]
     fn pty_mode() {
         let action = resolve_action(&sv(&["pty", "claude"]));
-        assert_eq!(action, Action::Pty { args: sv(&["claude"]) });
+        assert_eq!(
+            action,
+            Action::Pty {
+                args: sv(&["claude"])
+            }
+        );
     }
 
     #[test]
     fn pty_mode_with_args() {
         let action = resolve_action(&sv(&["pty", "claude", "--arg1"]));
-        assert_eq!(action, Action::Pty { args: sv(&["claude", "--arg1"]) });
+        assert_eq!(
+            action,
+            Action::Pty {
+                args: sv(&["claude", "--arg1"])
+            }
+        );
     }
 
     // ── Hook detection ──────────────────────────────────────────────────
@@ -879,19 +947,34 @@ mod tests {
     #[test]
     fn launch_tool_direct() {
         let action = resolve_action(&sv(&["claude"]));
-        assert_eq!(action, Action::Launch { args: sv(&["claude"]) });
+        assert_eq!(
+            action,
+            Action::Launch {
+                args: sv(&["claude"])
+            }
+        );
     }
 
     #[test]
     fn launch_tool_with_count() {
         let action = resolve_action(&sv(&["3", "claude", "--model", "haiku"]));
-        assert_eq!(action, Action::Launch { args: sv(&["3", "claude", "--model", "haiku"]) });
+        assert_eq!(
+            action,
+            Action::Launch {
+                args: sv(&["3", "claude", "--model", "haiku"])
+            }
+        );
     }
 
     #[test]
     fn launch_tool_with_global_flags() {
         let action = resolve_action(&sv(&["--name", "mybot", "--go", "claude"]));
-        assert_eq!(action, Action::Launch { args: sv(&["--name", "mybot", "--go", "claude"]) });
+        assert_eq!(
+            action,
+            Action::Launch {
+                args: sv(&["--name", "mybot", "--go", "claude"])
+            }
+        );
     }
 
     // ── Global flags ────────────────────────────────────────────────────
@@ -965,7 +1048,10 @@ mod tests {
         // --name after -- should NOT be extracted (it's message text)
         let (remaining, flags, _) =
             extract_global_flags_full(&sv(&["send", "@luna", "--", "--name", "not-a-flag"]));
-        assert_eq!(remaining, sv(&["send", "@luna", "--", "--name", "not-a-flag"]));
+        assert_eq!(
+            remaining,
+            sv(&["send", "@luna", "--", "--name", "not-a-flag"])
+        );
         assert!(flags.name.is_none());
     }
 
@@ -987,15 +1073,13 @@ mod tests {
     #[test]
     fn full_extract_help_after_separator_ignored() {
         // --help in message text after -- is not a help request
-        let (_, _, help) =
-            extract_global_flags_full(&sv(&["send", "@luna", "--", "--help"]));
+        let (_, _, help) = extract_global_flags_full(&sv(&["send", "@luna", "--", "--help"]));
         assert!(!help);
     }
 
     #[test]
     fn full_extract_go_flag() {
-        let (remaining, flags, _) =
-            extract_global_flags_full(&sv(&["stop", "--go", "all"]));
+        let (remaining, flags, _) = extract_global_flags_full(&sv(&["stop", "--go", "all"]));
         assert_eq!(remaining, sv(&["stop", "all"]));
         assert!(flags.go);
     }
@@ -1026,7 +1110,10 @@ mod tests {
 
     #[test]
     fn new_terminal_flag() {
-        assert_eq!(resolve_action(&sv(&["--new-terminal"])), Action::NewTerminal);
+        assert_eq!(
+            resolve_action(&sv(&["--new-terminal"])),
+            Action::NewTerminal
+        );
     }
 
     #[test]

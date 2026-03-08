@@ -1,13 +1,8 @@
 //! Auto-update checker — checks GitHub Releases API once daily.
-//!
-//! Port of the Python `get_update_info()` / `get_update_notice()` pattern:
-//! - Cache file: `~/.hcom/.tmp/flags/update_check` (version string or empty)
-//! - Uses file mtime for 24h TTL (no timestamp parsing)
-//! - Silent on network failure (never blocks CLI)
-//! - Background check: spawns detached curl process to avoid blocking (<5ms)
-//! - Detects install method from binary path to suggest correct update command
 
-use crate::paths::{atomic_write, hcom_path, FLAGS_DIR};
+use std::path::Path;
+
+use crate::paths::{FLAGS_DIR, atomic_write, hcom_path};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -34,7 +29,7 @@ fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
 
 /// Spawn a detached background process to fetch latest version and write the cache file.
 /// Returns immediately — result shows up on next command.
-fn spawn_background_check(flag: &PathBuf, current: &str) {
+fn spawn_background_check(flag: &Path, current: &str) {
     let flag_str = flag.to_string_lossy().to_string();
     let current = current.to_string();
 
@@ -73,14 +68,17 @@ fn get_update_cmd() -> &'static str {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => {
-            return "curl -fsSL https://raw.githubusercontent.com/aannoo/hcom/main/install.sh | sh"
+            return "curl -fsSL https://raw.githubusercontent.com/aannoo/hcom/main/install.sh | sh";
         }
     };
 
     let path_str = exe.to_string_lossy();
 
     // Dev build
-    if path_str.contains("/hook-comms/") || path_str.contains("/target/") || path_str.contains("/.hcom-build/") {
+    if path_str.contains("/hook-comms/")
+        || path_str.contains("/target/")
+        || path_str.contains("/.hcom-build/")
+    {
         return "./build.sh";
     }
 
@@ -109,10 +107,12 @@ pub fn get_update_info() -> Option<(String, &'static str)> {
     // Check if cache is stale and needs refresh
     let should_check = if flag.exists() {
         match flag.metadata().and_then(|m| m.modified()) {
-            Ok(mtime) => SystemTime::now()
-                .duration_since(mtime)
-                .unwrap_or(Duration::ZERO)
-                > CHECK_INTERVAL,
+            Ok(mtime) => {
+                SystemTime::now()
+                    .duration_since(mtime)
+                    .unwrap_or(Duration::ZERO)
+                    > CHECK_INTERVAL
+            }
             Err(_) => true,
         }
     } else {

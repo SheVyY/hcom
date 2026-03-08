@@ -1,17 +1,4 @@
-//! hcom: High-performance PTY wrapper, daemon client, and TUI
-//!
-//! Routing (handled by router module):
-//!   hcom pty <tool> [args...]     - PTY wrapper mode
-//!   hcom <hook> [payload]         - Hook handler (Claude/Gemini/Codex/OpenCode)
-//!   hcom <command> [args...]      - CLI command (send, list, events, ...)
-//!   hcom [N] <tool> [args...]     - Launch tool (claude, gemini, codex, opencode)
-//!   hcom --new-terminal           - Open TUI in new terminal window
-//!   hcom                          - TUI mode
-//!
-//! PTY mode outputs on startup:
-//!   INJECT_PORT=<port>   - TCP port for text injection
-//!   STATE_PORT=<port>    - TCP port for state queries
-//!   READY                - Signal that PTY is ready for use
+//! hcom — inter-agent communication CLI: PTY wrapper, hook handler, TUI.
 
 mod bootstrap;
 mod cli_context;
@@ -22,17 +9,18 @@ mod db;
 mod delivery;
 pub mod hooks;
 pub mod identity;
-pub mod launcher;
 mod instances;
+pub mod launcher;
 mod log;
 pub mod messages;
 mod notify;
 mod paths;
 mod pidtrack;
-pub mod scripts;
-pub mod relay;
 mod pty;
+pub mod relay;
 pub mod router;
+mod runtime_env;
+pub mod scripts;
 pub mod shared;
 pub mod terminal;
 mod tool;
@@ -104,8 +92,7 @@ pub fn run_pty(args: &[String]) -> Result<()> {
     let instance_name = config::Config::get().instance_name;
 
     // Resolve tool to full path (PATH may be minimal in launched environments)
-    let resolved = terminal::which_bin(tool_str)
-        .unwrap_or_else(|| tool_str.to_string());
+    let resolved = terminal::which_bin(tool_str).unwrap_or_else(|| tool_str.to_string());
 
     // On Termux, npm-installed tools need `node <path>` instead of direct exec
     let (command, extra_args);
@@ -117,7 +104,11 @@ pub fn run_pty(args: &[String]) -> Result<()> {
         command = resolved;
         extra_args = vec![];
     };
-    let full_args: Vec<&str> = extra_args.iter().copied().chain(tool_args.iter().copied()).collect();
+    let full_args: Vec<&str> = extra_args
+        .iter()
+        .copied()
+        .chain(tool_args.iter().copied())
+        .collect();
 
     // Create and run PTY
     let mut proxy = pty::Proxy::spawn(

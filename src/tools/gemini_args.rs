@@ -1,27 +1,22 @@
 //! Gemini CLI argument parsing and validation.
-//!
-//!
-//! Parses Gemini CLI arguments with support for:
-//! - Subcommands (mcp, extensions, hooks, skills)
-//! - Flag aliases (-m/--model, -p/--prompt, etc.)
-//! - Boolean flags (--yolo, --debug, etc.)
-//! - Value flags with space or equals syntax
-//! - Optional value flags (--resume with optional session id)
-//! - Repeatable flags (--extensions can appear multiple times)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use super::args_common::{
-    self, deduplicate_boolean_flags, extract_flag_name_from_token, extract_flag_names_from_tokens,
-    remove_flag_with_value, set_value_flag, shell_quote, shell_split, toggle_flag, FlagValue,
-    SourceType,
+    self, FlagValue, SourceType, deduplicate_boolean_flags, extract_flag_name_from_token,
+    extract_flag_names_from_tokens, remove_flag_with_value, set_value_flag, shell_quote,
+    shell_split, toggle_flag,
 };
 
-// ==================== Constants ====================
-
 const SUBCOMMANDS: &[&str] = &[
-    "mcp", "extensions", "extension", "hooks", "hook", "skills", "skill",
+    "mcp",
+    "extensions",
+    "extension",
+    "hooks",
+    "hook",
+    "skills",
+    "skill",
 ];
 
 fn subcommand_alias(s: &str) -> &str {
@@ -54,26 +49,52 @@ fn flag_aliases() -> &'static HashMap<&'static str, &'static str> {
 }
 
 const BOOLEAN_FLAGS: &[&str] = &[
-    "-d", "--debug", "-s", "--sandbox", "-y", "--yolo", "-l", "--list-extensions",
-    "--list-sessions", "--screen-reader", "-v", "--version", "-h", "--help",
-    "--experimental-acp", "--raw-output", "--accept-raw-output-risk",
+    "-d",
+    "--debug",
+    "-s",
+    "--sandbox",
+    "-y",
+    "--yolo",
+    "-l",
+    "--list-extensions",
+    "--list-sessions",
+    "--screen-reader",
+    "-v",
+    "--version",
+    "-h",
+    "--help",
+    "--experimental-acp",
+    "--raw-output",
+    "--accept-raw-output-risk",
 ];
 
 const VALUE_FLAGS: &[&str] = &[
-    "-m", "--model", "-p", "--prompt", "-i", "--prompt-interactive",
-    "--approval-mode", "--allowed-mcp-server-names", "--allowed-tools",
-    "-e", "--extensions", "--delete-session", "--include-directories",
-    "-o", "--output-format",
+    "-m",
+    "--model",
+    "-p",
+    "--prompt",
+    "-i",
+    "--prompt-interactive",
+    "--approval-mode",
+    "--allowed-mcp-server-names",
+    "--allowed-tools",
+    "-e",
+    "--extensions",
+    "--delete-session",
+    "--include-directories",
+    "-o",
+    "--output-format",
 ];
 
 const OPTIONAL_VALUE_FLAGS: &[&str] = &["--resume", "-r"];
 
 const REPEATABLE_FLAGS: &[&str] = &[
-    "-e", "--extensions", "--include-directories",
-    "--allowed-mcp-server-names", "--allowed-tools",
+    "-e",
+    "--extensions",
+    "--include-directories",
+    "--allowed-mcp-server-names",
+    "--allowed-tools",
 ];
-
-// ==================== Pre-computed lookups ====================
 
 struct GeminiFlagLookup {
     bool_set: HashSet<String>,
@@ -93,8 +114,10 @@ fn flag_lookup() -> &'static GeminiFlagLookup {
     LOOKUP.get_or_init(|| {
         let bool_set: HashSet<String> = BOOLEAN_FLAGS.iter().map(|s| s.to_string()).collect();
         let value_set: HashSet<String> = VALUE_FLAGS.iter().map(|s| s.to_string()).collect();
-        let opt_val_set: HashSet<String> = OPTIONAL_VALUE_FLAGS.iter().map(|s| s.to_string()).collect();
-        let repeatable_set: HashSet<String> = REPEATABLE_FLAGS.iter().map(|s| s.to_string()).collect();
+        let opt_val_set: HashSet<String> =
+            OPTIONAL_VALUE_FLAGS.iter().map(|s| s.to_string()).collect();
+        let repeatable_set: HashSet<String> =
+            REPEATABLE_FLAGS.iter().map(|s| s.to_string()).collect();
 
         let mut exact_flags = HashSet::new();
         for f in BOOLEAN_FLAGS {
@@ -120,9 +143,15 @@ fn flag_lookup() -> &'static GeminiFlagLookup {
         }
 
         let mut known_set: HashSet<String> = HashSet::new();
-        for f in BOOLEAN_FLAGS { known_set.insert(f.to_string()); }
-        for f in VALUE_FLAGS { known_set.insert(f.to_string()); }
-        for f in OPTIONAL_VALUE_FLAGS { known_set.insert(f.to_string()); }
+        for f in BOOLEAN_FLAGS {
+            known_set.insert(f.to_string());
+        }
+        for f in VALUE_FLAGS {
+            known_set.insert(f.to_string());
+        }
+        for f in OPTIONAL_VALUE_FLAGS {
+            known_set.insert(f.to_string());
+        }
         for (k, v) in flag_aliases().iter() {
             known_set.insert(k.to_string());
             known_set.insert(v.to_string());
@@ -165,15 +194,15 @@ fn looks_like_session_id(token: &str) -> bool {
             && parts[2].len() == 4
             && parts[3].len() == 4
             && parts[4].len() == 12
-            && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
+            && parts
+                .iter()
+                .all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
         {
             return true;
         }
     }
     false
 }
-
-// ==================== GeminiArgsSpec ====================
 
 /// Normalized representation of Gemini CLI arguments.
 #[derive(Debug, Clone)]
@@ -210,7 +239,11 @@ impl GeminiArgsSpec {
             .join(" ")
     }
 
-    pub fn rebuild_tokens(&self, include_positionals: bool, include_subcommand: bool) -> Vec<String> {
+    pub fn rebuild_tokens(
+        &self,
+        include_positionals: bool,
+        include_subcommand: bool,
+    ) -> Vec<String> {
         args_common::rebuild_tokens_from(
             &self.clean_tokens,
             &self.positional_indexes,
@@ -248,7 +281,9 @@ impl GeminiArgsSpec {
 
         // Fallback: scan clean_tokens
         let lookup = flag_lookup();
-        let is_optional = possible_flags.iter().any(|pf| lookup.opt_val_set.contains(pf));
+        let is_optional = possible_flags
+            .iter()
+            .any(|pf| lookup.opt_val_set.contains(pf));
         let mut last_value: Option<String> = None;
 
         let mut i = 0;
@@ -267,7 +302,9 @@ impl GeminiArgsSpec {
                 }
             }
 
-            if !found_eq && possible_flags.contains(&token_lower) && !is_optional
+            if !found_eq
+                && possible_flags.contains(&token_lower)
+                && !is_optional
                 && i + 1 < self.clean_tokens.len()
             {
                 let next = &self.clean_tokens[i + 1];
@@ -283,6 +320,7 @@ impl GeminiArgsSpec {
     }
 
     /// Return new spec with requested updates applied.
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &self,
         json_output: Option<bool>,
@@ -341,13 +379,8 @@ impl GeminiArgsSpec {
     }
 }
 
-// ==================== Public API ====================
-
 /// Resolve Gemini args from CLI (highest precedence) or env string.
-pub fn resolve_gemini_args(
-    cli_args: Option<&[String]>,
-    env_value: Option<&str>,
-) -> GeminiArgsSpec {
+pub fn resolve_gemini_args(cli_args: Option<&[String]>, env_value: Option<&str>) -> GeminiArgsSpec {
     if let Some(args) = cli_args {
         if !args.is_empty() {
             return parse_tokens(args, SourceType::Cli);
@@ -359,7 +392,11 @@ pub fn resolve_gemini_args(
             Ok(tokens) => return parse_tokens(&tokens, SourceType::Env),
             Err(e) => {
                 let empty: &[String] = &[];
-                return parse_tokens_with_errors(empty, SourceType::Env, vec![format!("invalid Gemini args: {}", e)]);
+                return parse_tokens_with_errors(
+                    empty,
+                    SourceType::Env,
+                    vec![format!("invalid Gemini args: {}", e)],
+                );
             }
         }
     }
@@ -369,11 +406,11 @@ pub fn resolve_gemini_args(
 }
 
 /// Merge env and CLI specs with smart precedence rules.
-pub fn merge_gemini_args(
-    env_spec: &GeminiArgsSpec,
-    cli_spec: &GeminiArgsSpec,
-) -> GeminiArgsSpec {
-    let final_subcommand = cli_spec.subcommand.clone().or_else(|| env_spec.subcommand.clone());
+pub fn merge_gemini_args(env_spec: &GeminiArgsSpec, cli_spec: &GeminiArgsSpec) -> GeminiArgsSpec {
+    let final_subcommand = cli_spec
+        .subcommand
+        .clone()
+        .or_else(|| env_spec.subcommand.clone());
 
     let final_positionals: Vec<String> = if !cli_spec.positional_tokens.is_empty() {
         if cli_spec.positional_tokens == [""] {
@@ -466,7 +503,8 @@ pub fn validate_conflicts(spec: &GeminiArgsSpec) -> Vec<String> {
     }
 
     if has_prompt_flag && !spec.positional_tokens.is_empty() {
-        warnings.push("ERROR: --prompt cannot be used with a positional query argument".to_string());
+        warnings
+            .push("ERROR: --prompt cannot be used with a positional query argument".to_string());
     }
 
     let has_interactive = spec.has_flag(
@@ -474,9 +512,8 @@ pub fn validate_conflicts(spec: &GeminiArgsSpec) -> Vec<String> {
         &["-i=", "--prompt-interactive="],
     );
     if has_prompt_flag && has_interactive {
-        warnings.push(
-            "ERROR: --prompt and --prompt-interactive cannot be used together".to_string(),
-        );
+        warnings
+            .push("ERROR: --prompt and --prompt-interactive cannot be used together".to_string());
     }
 
     if let Some(FlagValue::Single(ref val)) = spec.get_flag_value("--approval-mode") {
@@ -499,8 +536,6 @@ pub fn validate_conflicts(spec: &GeminiArgsSpec) -> Vec<String> {
 
     warnings
 }
-
-// ==================== Internal Parser ====================
 
 fn parse_tokens(tokens: &[impl AsRef<str>], source: SourceType) -> GeminiArgsSpec {
     parse_tokens_with_errors(tokens, source, vec![])
@@ -721,7 +756,10 @@ fn parse_tokens_with_errors(
         let is_flag_shaped = token_lower.starts_with("--")
             || (token_lower.starts_with('-')
                 && token_lower.len() == 2
-                && token_lower.chars().nth(1).is_some_and(|c| c.is_alphabetic()));
+                && token_lower
+                    .chars()
+                    .nth(1)
+                    .is_some_and(|c| c.is_alphabetic()));
 
         if is_flag_shaped && !looks_like_flag(&token_lower) {
             let base = token.split('=').next().unwrap_or(token);
@@ -770,8 +808,6 @@ fn parse_tokens_with_errors(
         approval_mode,
     }
 }
-
-// ==================== Tests ====================
 
 #[cfg(test)]
 mod tests {
@@ -1022,7 +1058,10 @@ mod tests {
 
     #[test]
     fn test_validate_no_conflicts() {
-        let spec = parse_tokens(&sv(&["--model", "gemini-2.0", "-i", "hello"]), SourceType::Cli);
+        let spec = parse_tokens(
+            &sv(&["--model", "gemini-2.0", "-i", "hello"]),
+            SourceType::Cli,
+        );
         assert!(validate_conflicts(&spec).is_empty());
     }
 
@@ -1054,7 +1093,9 @@ mod tests {
     fn test_session_id_detection() {
         assert!(looks_like_session_id("123"));
         assert!(looks_like_session_id("latest"));
-        assert!(looks_like_session_id("a1b2c3d4-e5f6-7890-abcd-ef1234567890"));
+        assert!(looks_like_session_id(
+            "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        ));
         assert!(!looks_like_session_id("explain this"));
         assert!(!looks_like_session_id("--debug"));
     }

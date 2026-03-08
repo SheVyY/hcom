@@ -9,24 +9,34 @@ pub fn get_tip(key: &str) -> Option<&'static str> {
     match key {
         "list:status" => Some(
             "[tip] Statuses: \u{25b6} active (will read new msgs very soon)  \u{25c9} listening (will read new msgs in <1s)\
-              \u{25a0} blocked (needs human user approval)  \u{25cb} inactive (dead)  \u{25e6} unknown (neutral)"
+              \u{25a0} blocked (needs human user approval)  \u{25cb} inactive (dead)  \u{25e6} unknown (neutral)",
         ),
         "list:types" => Some(
             "[tip] Types: [CLAUDE] [GEMINI] [CODEX] [OPENCODE] [claude] full features, automatic msg delivery\
-             | [AD-HOC] [gemini] [codex] limited"
+             | [AD-HOC] [gemini] [codex] limited",
         ),
         // Send-side
-        "send:intent:request" => Some("[tip] intent=request: You signaled you expect a response. You'll be auto-notified if they end their turn or stop without responding. Safe to move on."),
+        "send:intent:request" => Some(
+            "[tip] intent=request: You signaled you expect a response. You'll be auto-notified if they end their turn or stop without responding. Safe to move on.",
+        ),
         "send:intent:inform" => Some("[tip] intent=inform: You signaled no response needed."),
-        "send:intent:ack" => Some("[tip] intent=ack: You acknowledged receipt. Recipient won't respond."),
+        "send:intent:ack" => {
+            Some("[tip] intent=ack: You acknowledged receipt. Recipient won't respond.")
+        }
         // Recv-side
         "recv:intent:request" => Some("[tip] intent=request: Sender expects a response."),
         "recv:intent:inform" => Some("[tip] intent=inform: Sender doesn't expect a response."),
-        "recv:intent:ack" => Some("[tip] intent=ack: Sender confirmed receipt. No response needed."),
+        "recv:intent:ack" => {
+            Some("[tip] intent=ack: Sender confirmed receipt. No response needed.")
+        }
         // @mention matching
-        "mention:matching" => Some("[tip] @targets: @api- matches all with tag 'api' | @luna matches prefix | underscore blocks: @luna won't match luna_sub_1"),
+        "mention:matching" => Some(
+            "[tip] @targets: @api- matches all with tag 'api' | @luna matches prefix | underscore blocks: @luna won't match luna_sub_1",
+        ),
         // Subscriptions
-        "sub:created" => Some("[tip] You'll be notified via hcom message when the next matching event occurs. Safe to end your turn."),
+        "sub:created" => Some(
+            "[tip] You'll be notified via hcom message when the next matching event occurs. Safe to end your turn.",
+        ),
         _ => None,
     }
 }
@@ -74,6 +84,7 @@ pub fn print_launch_tips(
     launcher_participating: bool,
     background: bool,
     terminal_mode: &str,
+    terminal_auto_detected: bool,
 ) {
     if launched == 0 {
         return;
@@ -95,13 +106,16 @@ pub fn print_launch_tips(
     }
 
     // Terminal-mode awareness — built-in presets with close support
-    let has_close = terminal_mode == "kitty" || terminal_mode == "wezterm"
-        || terminal_mode.starts_with("tmux") || {
+    let has_close = terminal_mode == "kitty"
+        || terminal_mode == "wezterm"
+        || terminal_mode.starts_with("tmux")
+        || {
             // Check user-defined presets in config.toml for close command
             let config_path = crate::paths::config_toml_path();
             crate::config::load_toml_presets(&config_path)
                 .and_then(|presets| {
-                    presets.get(terminal_mode)
+                    presets
+                        .get(terminal_mode)
                         .and_then(|p| p.get("close"))
                         .map(|_| true)
                 })
@@ -110,43 +124,100 @@ pub fn print_launch_tips(
     let is_tmux = terminal_mode.starts_with("tmux");
 
     let managed = if has_close { "managed" } else { "unmanaged" };
-    tips.push(format!("[info] Terminal: {terminal_mode} ({managed})"));
+    let auto = if terminal_auto_detected { ", auto-detected" } else { "" };
+    tips.push(format!("[info] Terminal: {terminal_mode} ({managed}{auto})"));
 
     // --- Always-shown (batch-specific) ---
 
     if let Some(t) = tag {
-        tips.push(format!("[tip] Tag prefix targets all agents with that tag: hcom send @{t}- <message>"));
+        tips.push(format!(
+            "[tip] Tag prefix targets all agents with that tag: hcom send @{t}- <message>"
+        ));
     }
 
     if inside_tool && launcher_participating {
-        once(db, &mut tips, launcher_name, "launch:notify", "[tip] You'll be automatically notified when instances are launched & ready");
+        once(
+            db,
+            &mut tips,
+            launcher_name,
+            "launch:notify",
+            "[tip] You'll be automatically notified when instances are launched & ready",
+        );
     }
 
     // --- One-time (kv-tracked) ---
 
     if inside_tool {
         if !launcher_participating {
-            once(db, &mut tips, launcher_name, "launch:start", "[tip] Run 'hcom start' to receive notifications/messages from instances");
+            once(
+                db,
+                &mut tips,
+                launcher_name,
+                "launch:start",
+                "[tip] Run 'hcom start' to receive notifications/messages from instances",
+            );
         }
 
         if has_close {
-            once(db, &mut tips, launcher_name, "launch:kill", "[tip] Kill agents and close their panes: hcom kill <name1> <name2> ...");
+            once(
+                db,
+                &mut tips,
+                launcher_name,
+                "launch:kill",
+                "[tip] Kill agents and close their panes: hcom kill <name1> <name2> ...",
+            );
         }
 
         if !background {
-            once(db, &mut tips, launcher_name, "launch:term", "[tip] View an agent's screen: hcom term <name> | Inject keystrokes: hcom term inject <name> [text] --enter");
+            once(
+                db,
+                &mut tips,
+                launcher_name,
+                "launch:term",
+                "[tip] View an agent's screen: hcom term <name> | Inject keystrokes: hcom term inject <name> [text] --enter",
+            );
         }
 
         if is_tmux {
-            once(db, &mut tips, launcher_name, "launch:sub-blocked", "[tip] Get notified when an agent needs approval: hcom events sub --blocked <name>");
+            once(
+                db,
+                &mut tips,
+                launcher_name,
+                "launch:sub-blocked",
+                "[tip] Get notified when an agent needs approval: hcom events sub --blocked <name>",
+            );
         } else {
-            once(db, &mut tips, launcher_name, "launch:sub-idle", "[tip] Get notified when an agent goes idle: hcom events sub --idle <name>");
+            once(
+                db,
+                &mut tips,
+                launcher_name,
+                "launch:sub-idle",
+                "[tip] Get notified when an agent goes idle: hcom events sub --idle <name>",
+            );
         }
 
-        once(db, &mut tips, launcher_name, "list:status", get_tip("list:status").unwrap_or(""));
+        once(
+            db,
+            &mut tips,
+            launcher_name,
+            "list:status",
+            get_tip("list:status").unwrap_or(""),
+        );
     } else {
-        once(db, &mut tips, launcher_name, "launch:send", "[tip] Send a message to an agent: hcom send @<name> <message>");
-        once(db, &mut tips, launcher_name, "launch:list", "[tip] Check status: hcom list");
+        once(
+            db,
+            &mut tips,
+            launcher_name,
+            "launch:send",
+            "[tip] Send a message to an agent: hcom send @<name> <message>",
+        );
+        once(
+            db,
+            &mut tips,
+            launcher_name,
+            "launch:list",
+            "[tip] Check status: hcom list",
+        );
     }
 
     if !tips.is_empty() {

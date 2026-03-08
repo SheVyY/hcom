@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::db::HcomDb;
-use crate::paths::{hcom_dir, ARCHIVE_DIR};
+use crate::paths::{ARCHIVE_DIR, hcom_dir};
 use crate::shared::CommandContext;
 
 /// Parsed arguments for `hcom archive`.
@@ -40,7 +40,9 @@ fn list_archives(here_filter: bool) -> Vec<serde_json::Value> {
     }
 
     let cwd = if here_filter {
-        std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string())
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
     } else {
         None
     };
@@ -89,7 +91,8 @@ fn list_archives(here_filter: bool) -> Vec<serde_json::Value> {
         let (size_bytes, created) = match std::fs::metadata(&db_path) {
             Ok(meta) => {
                 let size = meta.len() as i64;
-                let mtime = meta.modified()
+                let mtime = meta
+                    .modified()
                     .map(crate::shared::system_time_to_epoch_f64)
                     .unwrap_or(0.0);
                 (size, mtime)
@@ -118,7 +121,11 @@ fn list_archives(here_filter: bool) -> Vec<serde_json::Value> {
 }
 
 /// Query event/instance counts from an archive DB. Returns None if filtered out.
-fn query_archive_counts(db_path: &Path, cwd: Option<&str>, here_filter: bool) -> Option<(i64, i64)> {
+fn query_archive_counts(
+    db_path: &Path,
+    cwd: Option<&str>,
+    here_filter: bool,
+) -> Option<(i64, i64)> {
     let conn = rusqlite::Connection::open(db_path).ok()?;
     let event_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
@@ -174,9 +181,7 @@ fn query_archive_events(
     sql_filter: Option<&str>,
     last: usize,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let path = archive["path"]
-        .as_str()
-        .ok_or("Invalid archive path")?;
+    let path = archive["path"].as_str().ok_or("Invalid archive path")?;
     let db_path = PathBuf::from(path).join("hcom.db");
     let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
 
@@ -195,7 +200,9 @@ fn query_archive_events(
             )
         }
     } else {
-        format!("SELECT id, timestamp, type, instance, data FROM events ORDER BY id DESC LIMIT {last}")
+        format!(
+            "SELECT id, timestamp, type, instance, data FROM events ORDER BY id DESC LIMIT {last}"
+        )
     };
 
     let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
@@ -228,14 +235,14 @@ fn query_archive_instances(
     archive: &serde_json::Value,
     sql_filter: Option<&str>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let path = archive["path"]
-        .as_str()
-        .ok_or("Invalid archive path")?;
+    let path = archive["path"].as_str().ok_or("Invalid archive path")?;
     let db_path = PathBuf::from(path).join("hcom.db");
     let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
 
     let query = if let Some(filter) = sql_filter {
-        format!("SELECT name, status, directory, transcript_path, session_id FROM instances WHERE {filter} ORDER BY created_at DESC")
+        format!(
+            "SELECT name, status, directory, transcript_path, session_id FROM instances WHERE {filter} ORDER BY created_at DESC"
+        )
     } else {
         "SELECT name, status, directory, transcript_path, session_id FROM instances ORDER BY created_at DESC".to_string()
     };
@@ -331,7 +338,10 @@ pub fn cmd_archive(_db: &HcomDb, args: &ArchiveArgs, _ctx: Option<&CommandContex
                 } else if instances.is_empty() {
                     println!("Archive is empty");
                 } else {
-                    println!("{:<8} {:<8} {:<40} transcript", "name", "status", "directory");
+                    println!(
+                        "{:<8} {:<8} {:<40} transcript",
+                        "name", "status", "directory"
+                    );
                     for inst in &instances {
                         let name = inst["name"].as_str().unwrap_or("?");
                         let status = inst["status"].as_str().unwrap_or("?");
@@ -341,11 +351,7 @@ pub fn cmd_archive(_db: &HcomDb, args: &ArchiveArgs, _ctx: Option<&CommandContex
                         // Truncate for display
                         let name = &name[..name.len().min(8)];
                         let status = &status[..status.len().min(8)];
-                        let dir = if dir.len() > 40 {
-                            &dir[..40]
-                        } else {
-                            &dir
-                        };
+                        let dir = if dir.len() > 40 { &dir[..40] } else { &dir };
                         println!("{name:<8} {status:<8} {dir:<40} {transcript}");
                     }
                 }
@@ -384,33 +390,28 @@ pub fn cmd_archive(_db: &HcomDb, args: &ArchiveArgs, _ctx: Option<&CommandContex
                             "message" => {
                                 let text = data["text"].as_str().unwrap_or("");
                                 let truncated = if text.len() > 60 {
-                                    let end = (0..=60).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+                                    let end = (0..=60)
+                                        .rev()
+                                        .find(|&i| text.is_char_boundary(i))
+                                        .unwrap_or(0);
                                     format!("{}...", &text[..end])
                                 } else {
                                     text.to_string()
                                 };
-                                println!(
-                                    "#{eid} {ts} {etype:<8} {inst:<8} \"{truncated}\""
-                                );
+                                println!("#{eid} {ts} {etype:<8} {inst:<8} \"{truncated}\"");
                             }
                             "status" => {
                                 let status = data["status"].as_str().unwrap_or("?");
                                 let context = data["context"].as_str().unwrap_or("");
-                                println!(
-                                    "#{eid} {ts} {etype:<8} {inst:<8} {status} {context}"
-                                );
+                                println!("#{eid} {ts} {etype:<8} {inst:<8} {status} {context}");
                             }
                             "life" => {
                                 let action = data["action"].as_str().unwrap_or("?");
                                 let by = data["by"].as_str().unwrap_or("");
                                 if by.is_empty() {
-                                    println!(
-                                        "#{eid} {ts} {etype:<8} {inst:<8} {action}"
-                                    );
+                                    println!("#{eid} {ts} {etype:<8} {inst:<8} {action}");
                                 } else {
-                                    println!(
-                                        "#{eid} {ts} {etype:<8} {inst:<8} {action} by:{by}"
-                                    );
+                                    println!("#{eid} {ts} {etype:<8} {inst:<8} {action} by:{by}");
                                 }
                             }
                             _ => {
@@ -452,7 +453,8 @@ mod tests {
     #[test]
     fn test_archive_args_sql_flag() {
         use clap::Parser;
-        let args = ArchiveArgs::try_parse_from(["archive", "--sql", "type='message'", "1"]).unwrap();
+        let args =
+            ArchiveArgs::try_parse_from(["archive", "--sql", "type='message'", "1"]).unwrap();
         assert_eq!(args.sql.as_deref(), Some("type='message'"));
         assert_eq!(args.selector.as_deref(), Some("1"));
     }
@@ -481,18 +483,14 @@ mod tests {
 
     #[test]
     fn test_resolve_archive_by_name() {
-        let archives = vec![
-            serde_json::json!({"index": 1, "name": "session-2025-01-01_120000"}),
-        ];
+        let archives = vec![serde_json::json!({"index": 1, "name": "session-2025-01-01_120000"})];
         let result = resolve_archive("2025-01-01", &archives);
         assert!(result.is_some());
     }
 
     #[test]
     fn test_resolve_archive_not_found() {
-        let archives = vec![
-            serde_json::json!({"index": 1, "name": "session-2025-01-01_120000"}),
-        ];
+        let archives = vec![serde_json::json!({"index": 1, "name": "session-2025-01-01_120000"})];
         let result = resolve_archive("nonexistent", &archives);
         assert!(result.is_none());
     }

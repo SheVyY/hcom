@@ -77,7 +77,10 @@ pub fn handle_state_message(db: &HcomDb, device_id: &str, payload: &[u8], own_de
         }
     };
 
-    let state = data.get("state").cloned().unwrap_or(Value::Object(Default::default()));
+    let state = data
+        .get("state")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
     let events = data
         .get("events")
         .and_then(|v| v.as_array())
@@ -120,14 +123,26 @@ pub fn handle_state_message(db: &HcomDb, device_id: &str, payload: &[u8], own_de
         .unwrap_or(0.0);
 
     if reset_ts > cached_reset {
-        let _ = db.conn().execute(
+        if let Err(e) = db.conn().execute(
             "DELETE FROM instances WHERE origin_device_id = ?",
             params![device_id],
-        );
-        let _ = db.conn().execute(
+        ) {
+            log::log_warn(
+                "relay",
+                "pull.reset_instances",
+                &format!("failed to delete instances for device {device_id}: {e}"),
+            );
+        }
+        if let Err(e) = db.conn().execute(
             "DELETE FROM events WHERE json_extract(data, '$._relay.device') = ?",
             params![device_id],
-        );
+        ) {
+            log::log_warn(
+                "relay",
+                "pull.reset_events",
+                &format!("failed to delete events for device {device_id}: {e}"),
+            );
+        }
         safe_kv_set(
             db,
             &format!("relay_reset_{}", device_id),
@@ -145,15 +160,19 @@ pub fn handle_state_message(db: &HcomDb, device_id: &str, payload: &[u8], own_de
 
     if local_reset_ts == 0.0 {
         // Fallback: query events table for last reset event
-        let ts_opt = db.conn().query_row(
-            "SELECT timestamp FROM events
+        let ts_opt = db
+            .conn()
+            .query_row(
+                "SELECT timestamp FROM events
              WHERE type='life' AND instance='_device'
                AND json_extract(data, '$.action')='reset'
                AND json_extract(data, '$._relay') IS NULL
              ORDER BY id DESC LIMIT 1",
-            [],
-            |row| row.get::<_, Option<String>>(0),
-        ).ok().flatten();
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten();
 
         if let Some(ts_str) = ts_opt {
             let ts = parse_ts(Some(&serde_json::Value::String(ts_str)));
@@ -194,7 +213,7 @@ pub fn handle_state_message(db: &HcomDb, device_id: &str, payload: &[u8], own_de
             .and_then(|v| v.as_str())
             .map(|p| super::add_device_suffix(p, &short_id));
 
-        let now = crate::shared::constants::now_epoch_f64();
+        let now = crate::shared::time::now_epoch_f64();
 
         let _ = db.conn().execute(
             "INSERT INTO instances (
@@ -216,7 +235,9 @@ pub fn handle_state_message(db: &HcomDb, device_id: &str, payload: &[u8], own_de
             params![
                 namespaced,
                 device_id,
-                inst.get("status").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                inst.get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown"),
                 inst.get("context").and_then(|v| v.as_str()).unwrap_or(""),
                 inst.get("detail").and_then(|v| v.as_str()).unwrap_or(""),
                 status_time,
@@ -227,12 +248,22 @@ pub fn handle_state_message(db: &HcomDb, device_id: &str, payload: &[u8], own_de
                 Option::<String>::None, // session_id
                 Option::<String>::None, // parent_session_id
                 Option::<String>::None, // agent_id
-                inst.get("wait_timeout").and_then(|v| v.as_i64()).unwrap_or(86400),
-                inst.get("last_stop").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                inst.get("tcp_mode").and_then(|v| v.as_bool()).unwrap_or(false),
+                inst.get("wait_timeout")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(86400),
+                inst.get("last_stop")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                inst.get("tcp_mode")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 inst.get("tag").and_then(|v| v.as_str()),
-                inst.get("tool").and_then(|v| v.as_str()).unwrap_or("claude"),
-                inst.get("background").and_then(|v| v.as_bool()).unwrap_or(false),
+                inst.get("tool")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("claude"),
+                inst.get("background")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             ],
         );
     }
@@ -262,10 +293,17 @@ pub fn handle_state_message(db: &HcomDb, device_id: &str, payload: &[u8], own_de
     super::control::handle_control_events(db, &events, &own_short_id, device_id);
 
     // Import remote events with dedup
-    import_remote_events(db, device_id, &short_id, &events, local_reset_ts, &own_short_id);
+    import_remote_events(
+        db,
+        device_id,
+        &short_id,
+        &events,
+        local_reset_ts,
+        &own_short_id,
+    );
 
     // Update sync timestamp
-    let now = crate::shared::constants::now_epoch_f64();
+    let now = crate::shared::time::now_epoch_f64();
     safe_kv_set(
         db,
         &format!("relay_sync_time_{}", device_id),
@@ -383,18 +421,13 @@ fn import_remote_events(
         }
 
         // Namespace instance name
-        let instance = event
-            .get("instance")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let namespaced_instance = if !instance.is_empty()
-            && !instance.contains(':')
-            && !instance.starts_with('_')
-        {
-            super::add_device_suffix(instance, short_id)
-        } else {
-            instance.to_string()
-        };
+        let instance = event.get("instance").and_then(|v| v.as_str()).unwrap_or("");
+        let namespaced_instance =
+            if !instance.is_empty() && !instance.contains(':') && !instance.starts_with('_') {
+                super::add_device_suffix(instance, short_id)
+            } else {
+                instance.to_string()
+            };
 
         // Clone and namespace data fields
         let mut data = event
@@ -406,7 +439,10 @@ fn import_remote_events(
             // Namespace 'from' field
             if let Some(from) = obj.get("from").and_then(|v| v.as_str()).map(String::from) {
                 if !from.contains(':') {
-                    obj.insert("from".to_string(), Value::String(super::add_device_suffix(&from, short_id)));
+                    obj.insert(
+                        "from".to_string(),
+                        Value::String(super::add_device_suffix(&from, short_id)),
+                    );
                 }
             }
 
@@ -448,7 +484,7 @@ fn import_remote_events(
 
         // Log per-message latency for message events
         if event_type == "message" && event_ts > 0.0 {
-            let now = crate::shared::constants::now_epoch_f64();
+            let now = crate::shared::time::now_epoch_f64();
             let latency_ms = ((now - event_ts) * 1000.0) as i64;
             log::log_with_fields(
                 "INFO",

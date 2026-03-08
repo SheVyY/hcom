@@ -303,7 +303,10 @@ pub fn cmd_status(db: &HcomDb, args: &StatusArgs, _ctx: Option<&CommandContext>)
                 "entries": [],
             },
         });
-        println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_default()
+        );
         return 0;
     }
 
@@ -321,7 +324,10 @@ pub fn cmd_status(db: &HcomDb, args: &StatusArgs, _ctx: Option<&CommandContext>)
     };
     println!("dir:       {} ({dir_status})", hcom_dir.display());
     if std::env::var("HCOM_DIR").is_ok() {
-        println!("           HCOM_DIR={}", std::env::var("HCOM_DIR").unwrap_or_default());
+        println!(
+            "           HCOM_DIR={}",
+            std::env::var("HCOM_DIR").unwrap_or_default()
+        );
     }
 
     // Config
@@ -338,7 +344,11 @@ pub fn cmd_status(db: &HcomDb, args: &StatusArgs, _ctx: Option<&CommandContext>)
     println!("tools:     {tools_str}");
 
     // Terminal — show preset name with availability
-    if terminal_config == "default" || terminal_config == "custom" || terminal_config == "print" || terminal_config.contains("{script}") {
+    if terminal_config == "default"
+        || terminal_config == "custom"
+        || terminal_config == "print"
+        || terminal_config.contains("{script}")
+    {
         println!("terminal:  {terminal_config}");
     } else {
         let available = crate::config::is_known_terminal_preset_pub(&terminal_config);
@@ -391,7 +401,7 @@ pub fn cmd_status(db: &HcomDb, args: &StatusArgs, _ctx: Option<&CommandContext>)
         let relay_pid_path = crate::paths::hcom_dir().join(".tmp").join("relay.pid");
         let relay_running = if let Ok(pid_str) = std::fs::read_to_string(&relay_pid_path) {
             if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                (unsafe { libc::kill(pid as i32, 0) }) == 0
+                crate::pidtrack::is_alive(pid)
             } else {
                 false
             }
@@ -412,17 +422,29 @@ pub fn cmd_status(db: &HcomDb, args: &StatusArgs, _ctx: Option<&CommandContext>)
 
     // Logs — always show summary, detail with --logs
     let log_summary = crate::log::get_log_summary(1.0);
-    let error_count = log_summary.get("error_count").and_then(|v| v.as_i64()).unwrap_or(0);
-    let warn_count = log_summary.get("warn_count").and_then(|v| v.as_i64()).unwrap_or(0);
+    let error_count = log_summary
+        .get("error_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let warn_count = log_summary
+        .get("warn_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     if error_count == 0 && warn_count == 0 {
         println!("logs:      \u{2713} ok");
     } else {
         let mut parts = Vec::new();
         if error_count > 0 {
-            parts.push(format!("{error_count} error{}", if error_count != 1 { "s" } else { "" }));
+            parts.push(format!(
+                "{error_count} error{}",
+                if error_count != 1 { "s" } else { "" }
+            ));
         }
         if warn_count > 0 {
-            parts.push(format!("{warn_count} warn{}", if warn_count != 1 { "s" } else { "" }));
+            parts.push(format!(
+                "{warn_count} warn{}",
+                if warn_count != 1 { "s" } else { "" }
+            ));
         }
         println!("logs:      {} (1h)", parts.join(", "));
     }
@@ -434,11 +456,21 @@ pub fn cmd_status(db: &HcomDb, args: &StatusArgs, _ctx: Option<&CommandContext>)
             let entries = crate::log::get_recent_logs(1.0, &["ERROR", "WARN"], 20);
             for entry in entries {
                 let ts = entry.get("ts").and_then(|v| v.as_str()).unwrap_or("");
-                let level = entry.get("level").and_then(|v| v.as_str()).unwrap_or("INFO");
-                let subsystem = entry.get("subsystem").and_then(|v| v.as_str()).unwrap_or("");
+                let level = entry
+                    .get("level")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("INFO");
+                let subsystem = entry
+                    .get("subsystem")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let event = entry.get("event").and_then(|v| v.as_str()).unwrap_or("");
                 if level == "ERROR" || level == "WARN" {
-                    let ts_short = if ts.len() > 8 { &ts[ts.len() - 8..] } else { ts };
+                    let ts_short = if ts.len() > 8 {
+                        &ts[ts.len() - 8..]
+                    } else {
+                        ts
+                    };
                     println!("           {ts_short} [{level:<5}] {subsystem}.{event}");
                 }
             }

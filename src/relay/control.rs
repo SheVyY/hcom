@@ -3,9 +3,9 @@
 //! Control messages are published to {relay_id}/control (non-retained).
 //! Used for cross-device instance management (stop/kill remote agents).
 
-use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::Client;
-use serde_json::{json, Value};
+use rumqttc::v5::mqttbytes::QoS;
+use serde_json::{Value, json};
 use std::time::Duration;
 
 use crate::config::HcomConfig;
@@ -35,7 +35,7 @@ fn build_control_payload(
     let device_id = read_device_uuid();
     let short_id = device_short_id(&device_id);
 
-    let now = crate::shared::constants::now_epoch_f64();
+    let now = crate::shared::time::now_epoch_f64();
 
     let control_payload = json!({
         "from_device": device_id,
@@ -66,10 +66,11 @@ pub fn send_control(
     target: &str,
     target_device_short_id: &str,
 ) -> bool {
-    let (topic, payload_bytes) = match build_control_payload(config, action, target, target_device_short_id) {
-        Some(v) => v,
-        None => return false,
-    };
+    let (topic, payload_bytes) =
+        match build_control_payload(config, action, target, target_device_short_id) {
+            Some(v) => v,
+            None => return false,
+        };
 
     match client.publish(&topic, QoS::AtLeastOnce, false, payload_bytes) {
         Ok(_) => {
@@ -80,10 +81,7 @@ pub fn send_control(
                 "",
                 &[
                     ("action", action),
-                    (
-                        "target",
-                        &format!("{}:{}", target, target_device_short_id),
-                    ),
+                    ("target", &format!("{}:{}", target, target_device_short_id)),
                 ],
             );
             true
@@ -103,10 +101,11 @@ fn send_control_via_ephemeral(
     target: &str,
     target_device_short_id: &str,
 ) -> bool {
-    let (topic, payload_bytes) = match build_control_payload(config, action, target, target_device_short_id) {
-        Some(v) => v,
-        None => return false,
-    };
+    let (topic, payload_bytes) =
+        match build_control_payload(config, action, target, target_device_short_id) {
+            Some(v) => v,
+            None => return false,
+        };
 
     let result = client.publish_and_wait(
         &topic,
@@ -124,10 +123,7 @@ fn send_control_via_ephemeral(
             "",
             &[
                 ("action", action),
-                (
-                    "target",
-                    &format!("{}:{}", target, target_device_short_id),
-                ),
+                ("target", &format!("{}:{}", target, target_device_short_id)),
             ],
         );
     } else {
@@ -150,7 +146,8 @@ pub fn send_control_ephemeral(
         None => return false,
     };
 
-    let result = send_control_via_ephemeral(config, &ephemeral, action, target, target_device_short_id);
+    let result =
+        send_control_via_ephemeral(config, &ephemeral, action, target, target_device_short_id);
 
     ephemeral.disconnect();
     result
@@ -175,10 +172,7 @@ pub fn handle_control_events(
             continue;
         }
 
-        let event_ts = event
-            .get("ts")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
+        let event_ts = event.get("ts").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
         // Dedup by timestamp
         if event_ts <= last_ctrl_ts {
@@ -270,7 +264,8 @@ mod tests {
         })];
 
         // own_short_id is "WXYZ" — event targets "ABCD", so nothing should happen
-        let db = HcomDb::open_at(&tempfile::NamedTempFile::new().unwrap().into_temp_path()).unwrap();
+        let db =
+            HcomDb::open_at(&tempfile::NamedTempFile::new().unwrap().into_temp_path()).unwrap();
         handle_control_events(&db, &events, "WXYZ", "device-123");
 
         // No crash, no panic — event was filtered

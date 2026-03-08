@@ -1,23 +1,4 @@
-//! Identity resolution — single source of truth for all tools.
-//!
-//! and hook handlers via a 3-tier binding system:
-//!
-//! 1. **Process binding**: `HCOM_PROCESS_ID` env var → `process_bindings` table → instance
-//! 2. **Session binding**: `session_id` → `session_bindings` table → instance
-//! 3. **Ad-hoc**: `--name <name>` on every command → direct instance lookup
-//!
-//! ## Extension point for transcript marker fallback
-//!
-//! `resolve_identity` accepts an optional `transcript_fallback` closure that hook
-//! handlers can provide for transcript-based identity resolution (Phase 1A.7).
-//! When process and session bindings fail, the closure is called to attempt
-//! resolution via `[hcom:name]` markers in tool transcripts.
-//!
-//! ## Identity gating
-//!
-//! Commands that require a resolved identity (send, listen) are gated by
-//! `require_identity_gate()`. External sender flags (`--from`, `-b`) bypass
-//! the gate for the send command.
+//! Identity resolution — 3-tier binding (process → session → ad-hoc).
 
 use regex::Regex;
 use std::sync::LazyLock;
@@ -25,31 +6,23 @@ use std::sync::LazyLock;
 use crate::db::HcomDb;
 use crate::shared::{HcomError, SenderIdentity, SenderKind};
 
-// ===== Name validation patterns =====
-
 /// UUID pattern for agent_id detection.
 static UUID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap()
 });
 
 /// Valid base instance name: lowercase letters, digits, underscore.
-static BASE_NAME_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-z0-9_]+$").unwrap());
+static BASE_NAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z0-9_]+$").unwrap());
 
 /// Dangerous characters for user-provided names (injection prevention).
-static DANGEROUS_CHARS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[|&;$`<>]").unwrap());
+static DANGEROUS_CHARS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[|&;$`<>]").unwrap());
 
 /// Dangerous characters including @ (for --from validation).
 static DANGEROUS_CHARS_WITH_AT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[|&;$`<>@]").unwrap());
 
-// ===== Commands that require identity =====
-
 /// Commands that require a resolved identity to operate.
 const REQUIRE_IDENTITY: &[&str] = &["send", "listen"];
-
-// ===== Name helpers =====
 
 /// Check if value looks like a UUID (agent_id format).
 pub fn looks_like_uuid(value: &str) -> bool {
@@ -68,7 +41,9 @@ pub fn is_valid_base_name(name: &str) -> bool {
 
 /// Build error message for invalid base instance names.
 pub fn base_name_error(name: &str) -> String {
-    format!("Invalid instance name '{name}'. Use base name only (lowercase letters, numbers, underscore).")
+    format!(
+        "Invalid instance name '{name}'. Use base name only (lowercase letters, numbers, underscore)."
+    )
 }
 
 /// Generate actionable error message for instance not found.
@@ -86,11 +61,9 @@ pub fn instance_not_found_error(name: &str) -> String {
 /// Validate user-provided name input for length and dangerous characters.
 ///
 /// Used for `--name` and `--from` flag validation in CLI commands.
-///
-/// Returns `Some(error_message)` if invalid, `None` if valid.
-pub fn validate_name_input(name: &str, max_length: usize, allow_at: bool) -> Option<String> {
+pub fn validate_name_input(name: &str, max_length: usize, allow_at: bool) -> Result<(), String> {
     if name.len() > max_length {
-        return Some(format!(
+        return Err(format!(
             "Name too long ({} chars, max {max_length})",
             name.len()
         ));
@@ -106,13 +79,14 @@ pub fn validate_name_input(name: &str, max_length: usize, allow_at: bool) -> Opt
     if !bad_chars.is_empty() {
         let unique: std::collections::HashSet<&str> = bad_chars.into_iter().collect();
         let chars_str: Vec<&str> = unique.into_iter().collect();
-        return Some(format!("Name contains invalid characters: {}", chars_str.join(" ")));
+        return Err(format!(
+            "Name contains invalid characters: {}",
+            chars_str.join(" ")
+        ));
     }
 
-    None
+    Ok(())
 }
-
-// ===== Identity resolution =====
 
 /// Resolve `--name NAME` with strict instance lookup.
 ///
@@ -157,7 +131,10 @@ pub fn resolve_from_name(db: &HcomDb, name: &str) -> Result<SenderIdentity, Hcom
             crate::log::log_info(
                 "identity",
                 "resolve_from_name",
-                &format!("name={}, method=agent_id, resolved={}", resolved_name, instance_name),
+                &format!(
+                    "name={}, method=agent_id, resolved={}",
+                    resolved_name, instance_name
+                ),
             );
             return Ok(SenderIdentity {
                 kind: SenderKind::Instance,
@@ -178,7 +155,9 @@ pub fn resolve_from_name(db: &HcomDb, name: &str) -> Result<SenderIdentity, Hcom
         "resolve_from_name.not_found",
         &format!("name={}", resolved_name),
     );
-    Err(HcomError::NotFound(instance_not_found_error(&resolved_name)))
+    Err(HcomError::NotFound(instance_not_found_error(
+        &resolved_name,
+    )))
 }
 
 /// Resolve sender identity for CLI commands and hook handlers.
@@ -191,7 +170,7 @@ pub fn resolve_from_name(db: &HcomDb, name: &str) -> Result<SenderIdentity, Hcom
 /// * `session_id` - Explicit session_id (for hook context, bypasses env detection)
 /// * `process_id` - HCOM_PROCESS_ID (for launched instances)
 /// * `codex_thread_id` - Codex thread ID for opportunistic session binding
-/// * `transcript_fallback` - Optional closure for transcript marker resolution (Phase 1A.7)
+/// * `transcript_fallback` - Optional closure for transcript marker resolution
 ///
 /// # Priority
 ///
@@ -201,6 +180,7 @@ pub fn resolve_from_name(db: &HcomDb, name: &str) -> Result<SenderIdentity, Hcom
 /// 4. Auto-detect from `process_id` (HCOM_PROCESS_ID)
 /// 5. `transcript_fallback` - transcript marker scan (hook extension point)
 /// 6. Error if no identity
+#[allow(clippy::type_complexity)]
 pub fn resolve_identity(
     db: &HcomDb,
     name: Option<&str>,
@@ -302,11 +282,11 @@ pub fn resolve_identity(
                             if !has_session {
                                 if let Some(thread_id) = codex_thread_id {
                                     if !thread_id.is_empty() {
-                                        if let Some(resolved) = crate::instances::bind_session_to_process(
-                                            db,
-                                            thread_id,
-                                            process_id,
-                                        ) {
+                                        if let Some(resolved) =
+                                            crate::instances::bind_session_to_process(
+                                                db, thread_id, process_id,
+                                            )
+                                        {
                                             final_name = resolved;
                                         }
                                     }
@@ -314,7 +294,8 @@ pub fn resolve_identity(
                             }
 
                             // Re-read instance data — session_id may have been set during binding
-                            let final_data = db.get_instance(&final_name)
+                            let final_data = db
+                                .get_instance(&final_name)
                                 .map_err(|e| HcomError::DatabaseError(e.to_string()))?
                                 .unwrap_or(d);
 
@@ -327,7 +308,10 @@ pub fn resolve_identity(
                             crate::log::log_info(
                                 "identity",
                                 "resolve",
-                                &format!("method=process_binding, name={}, process_id={}", final_name, pid),
+                                &format!(
+                                    "method=process_binding, name={}, process_id={}",
+                                    final_name, pid
+                                ),
                             );
                             return Ok(SenderIdentity {
                                 kind: SenderKind::Instance,
@@ -342,9 +326,7 @@ pub fn resolve_identity(
                                 "resolve.process_instance_missing",
                                 &format!("process_id={}, bound_name={}", pid, inst_name),
                             );
-                            return Err(HcomError::NotFound(instance_not_found_error(
-                                &inst_name,
-                            )));
+                            return Err(HcomError::NotFound(instance_not_found_error(&inst_name)));
                         }
                     }
                 }
@@ -362,7 +344,7 @@ pub fn resolve_identity(
         }
     }
 
-    // 5. Transcript marker fallback (hook extension point for Phase 1A.7)
+    // 5. Transcript marker fallback (hook extension point)
     if let Some(fallback) = transcript_fallback {
         if let Some(identity) = fallback(db) {
             return Ok(identity);
@@ -433,29 +415,35 @@ mod tests {
 
     fn insert_instance(db: &HcomDb, name: &str, session_id: Option<&str>, tag: Option<&str>) {
         let now = chrono::Utc::now().timestamp() as f64;
-        db.conn().execute(
-            "INSERT INTO instances (name, session_id, tag, status, created_at, tool)
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, session_id, tag, status, created_at, tool)
              VALUES (?1, ?2, ?3, 'active', ?4, 'claude')",
-            rusqlite::params![name, session_id, tag, now],
-        ).unwrap();
+                rusqlite::params![name, session_id, tag, now],
+            )
+            .unwrap();
     }
 
     fn insert_process_binding(db: &HcomDb, process_id: &str, instance_name: &str) {
         let now = chrono::Utc::now().timestamp() as f64;
-        db.conn().execute(
-            "INSERT INTO process_bindings (process_id, instance_name, updated_at)
+        db.conn()
+            .execute(
+                "INSERT INTO process_bindings (process_id, instance_name, updated_at)
              VALUES (?1, ?2, ?3)",
-            rusqlite::params![process_id, instance_name, now],
-        ).unwrap();
+                rusqlite::params![process_id, instance_name, now],
+            )
+            .unwrap();
     }
 
     fn insert_session_binding(db: &HcomDb, session_id: &str, instance_name: &str) {
         let now = chrono::Utc::now().timestamp() as f64;
-        db.conn().execute(
-            "INSERT INTO session_bindings (session_id, instance_name, created_at)
+        db.conn()
+            .execute(
+                "INSERT INTO session_bindings (session_id, instance_name, created_at)
              VALUES (?1, ?2, ?3)",
-            rusqlite::params![session_id, instance_name, now],
-        ).unwrap();
+                rusqlite::params![session_id, instance_name, now],
+            )
+            .unwrap();
     }
 
     // ── Name validation tests ──────────────────────────────────────────
@@ -502,26 +490,23 @@ mod tests {
     #[test]
     fn test_validate_name_input() {
         // Valid
-        assert!(validate_name_input("luna", 50, true).is_none());
-        assert!(validate_name_input("test_name", 50, true).is_none());
+        assert!(validate_name_input("luna", 50, true).is_ok());
+        assert!(validate_name_input("test_name", 50, true).is_ok());
 
         // Too long
         let long_name = "a".repeat(51);
-        let err = validate_name_input(&long_name, 50, true);
-        assert!(err.is_some());
-        assert!(err.unwrap().contains("too long"));
+        let err = validate_name_input(&long_name, 50, true).unwrap_err();
+        assert!(err.contains("too long"));
 
         // Dangerous chars
-        let err = validate_name_input("name;evil", 50, true);
-        assert!(err.is_some());
-        assert!(err.unwrap().contains("invalid characters"));
+        let err = validate_name_input("name;evil", 50, true).unwrap_err();
+        assert!(err.contains("invalid characters"));
 
         // @ allowed by default
-        assert!(validate_name_input("@luna", 50, true).is_none());
+        assert!(validate_name_input("@luna", 50, true).is_ok());
 
         // @ rejected when allow_at=false
-        let err = validate_name_input("@luna", 50, false);
-        assert!(err.is_some());
+        assert!(validate_name_input("@luna", 50, false).is_err());
     }
 
     // ── resolve_from_name tests ────────────────────────────────────────
@@ -594,8 +579,7 @@ mod tests {
         insert_instance(&db, "luna", Some("sess-1"), None);
         insert_session_binding(&db, "sess-1", "luna");
 
-        let identity =
-            resolve_identity(&db, None, None, Some("sess-1"), None, None, None).unwrap();
+        let identity = resolve_identity(&db, None, None, Some("sess-1"), None, None, None).unwrap();
         assert!(matches!(identity.kind, SenderKind::Instance));
         assert_eq!(identity.name, "luna");
         assert_eq!(identity.session_id.as_deref(), Some("sess-1"));
@@ -606,8 +590,7 @@ mod tests {
         let (db, _dir) = make_test_db();
         insert_instance(&db, "luna", None, None);
 
-        let identity =
-            resolve_identity(&db, Some("luna"), None, None, None, None, None).unwrap();
+        let identity = resolve_identity(&db, Some("luna"), None, None, None, None, None).unwrap();
         assert_eq!(identity.name, "luna");
     }
 
@@ -654,8 +637,7 @@ mod tests {
         let (db, _dir) = make_test_db();
         // No process binding exists
 
-        let err =
-            resolve_identity(&db, None, None, None, Some("pid-123"), None, None).unwrap_err();
+        let err = resolve_identity(&db, None, None, None, Some("pid-123"), None, None).unwrap_err();
         assert!(err.to_string().contains("expired"));
     }
 
@@ -714,16 +696,8 @@ mod tests {
         insert_session_binding(&db, "sess-1", "luna");
 
         // session_id takes priority over name
-        let identity = resolve_identity(
-            &db,
-            Some("nova"),
-            None,
-            Some("sess-1"),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let identity =
+            resolve_identity(&db, Some("nova"), None, Some("sess-1"), None, None, None).unwrap();
         assert_eq!(identity.name, "luna");
     }
 

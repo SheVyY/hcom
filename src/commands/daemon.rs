@@ -20,10 +20,6 @@ fn read_pid() -> Option<u32> {
         .and_then(|s| s.trim().parse().ok())
 }
 
-fn is_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-}
-
 pub(crate) fn daemon_status() -> i32 {
     let pid = match read_pid() {
         Some(p) => p,
@@ -33,7 +29,7 @@ pub(crate) fn daemon_status() -> i32 {
         }
     };
 
-    if !is_alive(pid) {
+    if !crate::pidtrack::is_alive(pid) {
         println!("Daemon: stale PID file (process not running)");
         return 0;
     }
@@ -47,7 +43,7 @@ pub(crate) fn daemon_start() -> i32 {
 
     // Check if already running
     if let Some(pid) = read_pid() {
-        if is_alive(pid) {
+        if crate::pidtrack::is_alive(pid) {
             println!("Daemon already running (PID {pid})");
             return 0;
         }
@@ -99,18 +95,20 @@ pub(crate) fn daemon_stop() -> i32 {
         }
     };
 
-    if !is_alive(pid) {
+    if !crate::pidtrack::is_alive(pid) {
         println!("Daemon not running (stale PID file)");
         let _ = fs::remove_file(&pp);
         return 0;
     }
 
-    unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
     println!("Sent SIGTERM to daemon (PID {pid})");
 
     for _ in 0..50 {
         thread::sleep(Duration::from_millis(100));
-        if !is_alive(pid) {
+        if !crate::pidtrack::is_alive(pid) {
             println!("Daemon stopped");
             let _ = fs::remove_file(&pp);
             return 0;
@@ -118,7 +116,14 @@ pub(crate) fn daemon_stop() -> i32 {
     }
 
     println!("Daemon did not respond to SIGTERM, escalating to SIGKILL");
-    unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+    let kill_ret = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    if kill_ret != 0 {
+        eprintln!(
+            "SIGKILL failed (errno {}), PID file retained",
+            std::io::Error::last_os_error()
+        );
+        return 1;
+    }
     println!("Daemon killed (SIGKILL)");
     let _ = fs::remove_file(&pp);
     0

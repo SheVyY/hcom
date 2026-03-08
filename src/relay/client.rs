@@ -4,10 +4,10 @@
 //! Manual exponential backoff on connection errors (rumqttc auto-reconnects
 //! with zero delay; we add sleep between retries).
 
-use rumqttc::v5::mqttbytes::v5::Packet;
 use rumqttc::v5::mqttbytes::QoS;
+use rumqttc::v5::mqttbytes::v5::Packet;
 use rumqttc::v5::{Client, Connection, Event, MqttOptions};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,10 @@ use crate::config::HcomConfig;
 use crate::db::HcomDb;
 use crate::log;
 
-use super::{get_broker_from_config, is_relay_enabled, read_device_uuid, set_relay_status, state_topic, wildcard_topic};
+use super::{
+    get_broker_from_config, is_relay_enabled, read_device_uuid, set_relay_status, state_topic,
+    wildcard_topic,
+};
 
 /// Commands sent from the main thread to the relay event loop.
 pub enum RelayCommand {
@@ -76,8 +79,7 @@ impl MqttRelay {
             return Err("relay not configured or disabled".into());
         }
 
-        let (host, port, use_tls) = get_broker_from_config(config)
-            .ok_or("no broker configured")?;
+        let (host, port, use_tls) = get_broker_from_config(config).ok_or("no broker configured")?;
 
         let relay_id = config.relay_id.clone();
         let device_uuid = read_device_uuid();
@@ -123,7 +125,11 @@ impl MqttRelay {
             push_interval: Duration::from_secs(5),
         };
 
-        log::log_info("relay", "relay.connect", &format!("connecting to {}:{}", host, port));
+        log::log_info(
+            "relay",
+            "relay.connect",
+            &format!("connecting to {}:{}", host, port),
+        );
 
         Ok((relay, connection, cmd_tx))
     }
@@ -341,7 +347,11 @@ impl MqttRelay {
         event_rx: &mpsc::Receiver<Result<Event, rumqttc::v5::ConnectionError>>,
     ) {
         let topic = state_topic(&self.relay_id, &self.device_uuid);
-        log::log_info("relay", "relay.shutdown_graceful", "clearing retained state");
+        log::log_info(
+            "relay",
+            "relay.shutdown_graceful",
+            "clearing retained state",
+        );
 
         // Publish empty retained to clear our state from broker
         if let Err(e) = self.client.publish(
@@ -492,14 +502,18 @@ pub fn create_ephemeral_client(config: &HcomConfig) -> Option<EphemeralClient> {
                     }
                 }
                 Err(_) => {
-                    // Signal failure so waiters don't block forever
-                    let (_, cvar) = &*connected_clone;
-                    cvar.notify_one();
+                    // Signal failure so waiters don't block forever.
+                    // Must hold mutex when notifying to avoid lost-wakeup race.
+                    // Leave flag=false so waiter knows connection failed.
+                    let (lock, cvar) = &*connected_clone;
+                    if let Ok(_g) = lock.lock() {
+                        cvar.notify_one();
+                    }
                     let (lock, cvar) = &*pub_result_clone;
                     if let Ok(mut r) = lock.lock() {
                         r.errored = true;
+                        cvar.notify_one();
                     }
-                    cvar.notify_one();
                     break;
                 }
                 _ => {}
@@ -510,9 +524,7 @@ pub fn create_ephemeral_client(config: &HcomConfig) -> Option<EphemeralClient> {
     // Wait for CONNACK with 5s timeout
     let (lock, cvar) = &*connected;
     let guard = lock.lock().ok()?;
-    let (flag, _) = cvar
-        .wait_timeout(guard, Duration::from_secs(5))
-        .ok()?;
+    let (flag, _) = cvar.wait_timeout(guard, Duration::from_secs(5)).ok()?;
 
     if !*flag {
         let _ = client.disconnect();

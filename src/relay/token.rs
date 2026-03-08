@@ -4,8 +4,8 @@
 //!   v0x01: public broker  — 0x01 + 16 UUID bytes + 1 broker index → 18 bytes → ~24 char base64url
 //!   v0x02: private broker — 0x02 + 16 UUID bytes + URL bytes → variable length base64url
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use super::DEFAULT_BROKERS;
 
@@ -190,7 +190,8 @@ mod tests {
     #[test]
     fn test_cross_language_parity_v0x02() {
         // Known v0x02 test vector: relay_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890", broker="mqtts://my-private-broker.example.com:8883"
-        let expected_token = "AqGyw9Tl9niQq83vEjRWeJBtcXR0czovL215LXByaXZhdGUtYnJva2VyLmV4YW1wbGUuY29tOjg4ODM";
+        let expected_token =
+            "AqGyw9Tl9niQq83vEjRWeJBtcXR0czovL215LXByaXZhdGUtYnJva2VyLmV4YW1wbGUuY29tOjg4ODM";
         let (relay_id, broker) = decode_join_token(expected_token).unwrap();
         assert_eq!(relay_id, "a1b2c3d4-e5f6-7890-abcd-ef1234567890");
         assert_eq!(broker, "mqtts://my-private-broker.example.com:8883");

@@ -1,13 +1,4 @@
-//! Instance lifecycle and identity management.
-//!
-//! - CVCV name generation with softmax sampling + Hamming rejection
-//! - Name reservation with flock + placeholder DB row
-//! - Status state machine (launching, stale, wake grace, remote bypass)
-//! - Sleep/wake detection (monotonic vs wall-clock drift)
-//! - bind_session_to_process (4 paths + rollback)
-//! - set_status, update_instance_position, save_instance
-//! - create_orphaned_pty_identity
-//! - Cleanup functions for stale/placeholder instances
+//! Instance lifecycle — name generation, status state machine, session binding.
 
 use anyhow::Result;
 use std::collections::HashSet;
@@ -15,9 +6,16 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::db::{HcomDb, InstanceRow};
-use crate::shared::constants::{now_epoch_f64, now_epoch_i64};
+use crate::shared::time::{now_epoch_f64, now_epoch_i64};
 
-// ==================== Timeout Constants ====================
+/// Parameters for `set_status` — fields beyond name/status/context default to empty.
+#[derive(Debug, Default)]
+pub struct StatusUpdate<'a> {
+    pub detail: &'a str,
+    pub msg_ts: &'a str,
+    pub launcher_override: Option<&'a str>,
+    pub batch_id_override: Option<&'a str>,
+}
 
 /// Max time between instance creation and session binding before launch is considered failed.
 pub const LAUNCH_PLACEHOLDER_TIMEOUT: i64 = 30;
@@ -47,11 +45,7 @@ const REMOTE_DEVICE_STALE_THRESHOLD: f64 = 90.0;
 /// Window for showing recently stopped instances (10 minutes).
 pub const RECENTLY_STOPPED_WINDOW: f64 = 600.0;
 
-use crate::shared::{
-    ST_ACTIVE, ST_LISTENING, ST_BLOCKED, ST_INACTIVE, ST_LAUNCHING,
-};
-
-// ==================== Computed Instance Status ====================
+use crate::shared::{ST_ACTIVE, ST_BLOCKED, ST_INACTIVE, ST_LAUNCHING, ST_LISTENING};
 
 /// Return type for get_instance_status() — structured access to computed status.
 #[derive(Debug, Clone)]
@@ -64,23 +58,8 @@ pub struct ComputedStatus {
     pub context: String,
 }
 
-/// Format age in human-readable compact form.
-pub fn format_age(seconds: i64) -> String {
-    if seconds <= 0 {
-        return "now".to_string();
-    }
-    if seconds < 60 {
-        format!("{}s", seconds)
-    } else if seconds < 3600 {
-        format!("{}m", seconds / 60)
-    } else if seconds < 86400 {
-        format!("{}h", seconds / 3600)
-    } else {
-        format!("{}d", seconds / 86400)
-    }
-}
+pub use crate::shared::time::format_age;
 
-// ==================== Sleep/Wake Detection ====================
 // Tracks wall-clock vs monotonic-clock drift to detect system sleep.
 // On macOS, Instant (mach_absolute_time) does NOT advance during sleep,
 // but SystemTime (gettimeofday) does. Large drift = just woke from sleep.
@@ -96,7 +75,6 @@ static WAKE_STATE: Mutex<WakeState> = Mutex::new(WakeState {
     last_wall: 0.0,
     grace_until_mono: None,
 });
-
 
 /// Detect sleep/wake via wall-vs-monotonic drift, return whether grace period is active.
 ///
@@ -137,16 +115,21 @@ pub fn is_in_wake_grace_with_persistence(db: Option<&crate::db::HcomDb>) -> bool
                         crate::log::log_info(
                             "cleanup",
                             "sleep_wake_detected",
-                            &format!("drift={:.0}s (cross-process), grace={:.0}s", wall_elapsed, WAKE_GRACE_PERIOD),
+                            &format!(
+                                "drift={:.0}s (cross-process), grace={:.0}s",
+                                wall_elapsed, WAKE_GRACE_PERIOD
+                            ),
                         );
-                        state.grace_until_mono = Some(now_mono + std::time::Duration::from_secs_f64(WAKE_GRACE_PERIOD));
+                        state.grace_until_mono =
+                            Some(now_mono + std::time::Duration::from_secs_f64(WAKE_GRACE_PERIOD));
                     }
                     // Also check if a grace period was active when last process exited
                     if let Ok(Some(grace_until)) = db.kv_get("_wake_grace_until") {
                         if let Ok(grace_wall) = grace_until.parse::<f64>() {
                             if now_wall < grace_wall {
                                 let remaining = grace_wall - now_wall;
-                                state.grace_until_mono = Some(now_mono + std::time::Duration::from_secs_f64(remaining));
+                                state.grace_until_mono =
+                                    Some(now_mono + std::time::Duration::from_secs_f64(remaining));
                             }
                         }
                     }
@@ -191,8 +174,6 @@ pub fn is_in_wake_grace_with_persistence(db: Option<&crate::db::HcomDb>) -> bool
     }
 }
 
-// ==================== Instance Status Computation ====================
-
 /// Compute current status from stored fields and heartbeat.
 pub fn get_instance_status(data: &InstanceRow, db: &HcomDb) -> ComputedStatus {
     let status = &data.status;
@@ -208,7 +189,11 @@ pub fn get_instance_status(data: &InstanceRow, db: &HcomDb) -> ComputedStatus {
         if age < LAUNCH_PLACEHOLDER_TIMEOUT {
             return ComputedStatus {
                 status: ST_LAUNCHING.to_string(),
-                age_string: if age > 0 { format_age(age) } else { String::new() },
+                age_string: if age > 0 {
+                    format_age(age)
+                } else {
+                    String::new()
+                },
                 description: "launching".to_string(),
                 age_seconds: age,
                 context: "new".to_string(),
@@ -228,7 +213,11 @@ pub fn get_instance_status(data: &InstanceRow, db: &HcomDb) -> ComputedStatus {
     let mut current_context = status_context.to_string();
 
     // Compute age from status_time, fallback to created_at
-    let mut age = if status_time > 0 { now - status_time } else { 0 };
+    let mut age = if status_time > 0 {
+        now - status_time
+    } else {
+        0
+    };
     if status_time == 0 {
         let created_at = data.created_at as i64;
         if created_at > 0 {
@@ -253,7 +242,11 @@ pub fn get_instance_status(data: &InstanceRow, db: &HcomDb) -> ComputedStatus {
             };
 
             let has_tcp = data.tcp_mode != 0 || db.has_notify_endpoint(&data.name);
-            let threshold = if has_tcp { HEARTBEAT_THRESHOLD_TCP } else { HEARTBEAT_THRESHOLD_NO_TCP };
+            let threshold = if has_tcp {
+                HEARTBEAT_THRESHOLD_TCP
+            } else {
+                HEARTBEAT_THRESHOLD_NO_TCP
+            };
 
             if heartbeat_age > threshold {
                 if wake_grace {
@@ -315,7 +308,11 @@ pub fn get_instance_status(data: &InstanceRow, db: &HcomDb) -> ComputedStatus {
     // Extract simple context key
     let simple_context = if current_context.contains(':') {
         let (prefix, suffix) = current_context.split_once(':').unwrap();
-        if prefix == "exit" { suffix.to_string() } else { prefix.to_string() }
+        if prefix == "exit" {
+            suffix.to_string()
+        } else {
+            prefix.to_string()
+        }
     } else {
         current_context.clone()
     };
@@ -367,7 +364,7 @@ pub fn get_status_description(status: &str, context: &str) -> String {
             }
         }
         ST_BLOCKED => {
-            if context == "pty:approval" {
+            if context == "pty:approval" || context == "approval" {
                 "blocked: approval pending".to_string()
             } else if context.is_empty() {
                 "blocked: permission needed".to_string()
@@ -392,8 +389,6 @@ pub fn get_status_description(status: &str, context: &str) -> String {
     }
 }
 
-// ==================== Instance Helper Predicates ====================
-
 pub fn is_remote_instance(data: &InstanceRow) -> bool {
     data.origin_device_id.is_some()
 }
@@ -402,13 +397,39 @@ pub fn is_subagent_instance(data: &InstanceRow) -> bool {
     data.parent_session_id.is_some()
 }
 
+/// Check if a session/instance is in subagent context (Task active).
+///
+/// Accepts either a session_id or instance name. Returns true if the instance
+/// has active running tasks (i.e. a Task subagent is executing).
+pub fn in_subagent_context(db: &HcomDb, session_id: &str) -> bool {
+    let instance_name = match db.get_session_binding(session_id) {
+        Ok(Some(name)) => name,
+        _ => session_id.to_string(),
+    };
+
+    let row: Option<Option<String>> = db
+        .conn()
+        .query_row(
+            "SELECT running_tasks FROM instances WHERE name = ? LIMIT 1",
+            rusqlite::params![instance_name],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok();
+
+    match row {
+        Some(Some(rt_json)) if !rt_json.is_empty() => {
+            let rt = parse_running_tasks(Some(&rt_json));
+            rt.active
+        }
+        _ => false,
+    }
+}
+
 pub fn is_launching_placeholder(data: &InstanceRow) -> bool {
     data.session_id.is_none()
         && data.status_context == "new"
         && (data.status == ST_INACTIVE || data.status == "pending")
 }
-
-// ==================== Display Name ====================
 
 /// Get full display name: "{tag}-{name}" if tag exists, else just "{name}".
 pub fn get_full_name(data: &InstanceRow) -> String {
@@ -443,7 +464,53 @@ pub fn resolve_display_name(db: &HcomDb, input_name: &str) -> Option<String> {
     None
 }
 
-// ==================== Running Tasks ====================
+/// Resolve base name or tag-name using live instances first, then stopped snapshots.
+pub fn resolve_display_name_or_stopped(db: &HcomDb, input_name: &str) -> Option<String> {
+    if let Some(name) = resolve_display_name(db, input_name) {
+        return Some(name);
+    }
+
+    // Direct stopped-instance match by base name.
+    if db
+        .conn()
+        .query_row(
+            "SELECT instance FROM events
+             WHERE type = 'life'
+               AND instance = ?1
+               AND json_extract(data, '$.action') = 'stopped'
+             LIMIT 1",
+            rusqlite::params![input_name],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .is_some()
+    {
+        return Some(input_name.to_string());
+    }
+
+    // Stopped tag-name match against the stored snapshot tag.
+    if let Some((tag, name)) = input_name.split_once('-') {
+        if db
+            .conn()
+            .query_row(
+                "SELECT instance FROM events
+                 WHERE type = 'life'
+                   AND instance = ?1
+                   AND json_extract(data, '$.action') = 'stopped'
+                   AND json_extract(data, '$.snapshot.tag') = ?2
+                 LIMIT 1",
+                rusqlite::params![name, tag],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .is_some()
+        {
+            return Some(name.to_string());
+        }
+    }
+
+    None
+}
 
 /// Parsed running_tasks JSON field.
 #[derive(Debug, Clone, Default)]
@@ -453,8 +520,12 @@ pub struct RunningTasks {
 }
 
 pub fn parse_running_tasks(json_str: Option<&str>) -> RunningTasks {
-    let Some(s) = json_str else { return RunningTasks::default() };
-    if s.is_empty() { return RunningTasks::default(); }
+    let Some(s) = json_str else {
+        return RunningTasks::default();
+    };
+    if s.is_empty() {
+        return RunningTasks::default();
+    }
 
     match serde_json::from_str::<serde_json::Value>(s) {
         Ok(serde_json::Value::Object(obj)) => RunningTasks {
@@ -469,7 +540,6 @@ pub fn parse_running_tasks(json_str: Option<&str>) -> RunningTasks {
     }
 }
 
-// ==================== CVCV Name Generation ====================
 // Names are 4-letter CVCV (consonant-vowel-consonant-vowel) patterns.
 // Curated "gold" names score highest, generated names fill the pool.
 
@@ -480,22 +550,20 @@ const VOWELS: &[u8] = b"aeiou";
 fn gold_names() -> HashSet<&'static str> {
     [
         // Real/common names
-        "luna", "nova", "nora", "zara", "kira", "mila", "lola", "lara", "sara", "rhea",
-        "nina", "mira", "tara", "sora", "cora", "dora", "gina", "lina", "viva", "risa",
-        "mimi", "coco", "koko", "lili", "navi", "ravi", "rani", "riko", "niko", "mako",
-        "saki", "maki", "nami", "loki", "rori", "lori", "mori", "nori", "tori", "gigi",
-        "hana", "hiro", "tomo", "sumi", "vega", "kobe", "rafa", "lana", "lena", "dara",
-        "niro", "yuki", "yuri", "maya", "juno", "nico", "rosa", "vera", "rina", "mika",
-        "yoko", "yumi", "ruby", "lily", "cici", "hera",
+        "luna", "nova", "nora", "zara", "kira", "mila", "lola", "lara", "sara", "rhea", "nina",
+        "mira", "tara", "sora", "cora", "dora", "gina", "lina", "viva", "risa", "mimi", "coco",
+        "koko", "lili", "navi", "ravi", "rani", "riko", "niko", "mako", "saki", "maki", "nami",
+        "loki", "rori", "lori", "mori", "nori", "tori", "gigi", "hana", "hiro", "tomo", "sumi",
+        "vega", "kobe", "rafa", "lana", "lena", "dara", "niro", "yuki", "yuri", "maya", "juno",
+        "nico", "rosa", "vera", "rina", "mika", "yoko", "yumi", "ruby", "lily", "cici", "hera",
         // Real words
-        "miso", "taro", "boba", "kava", "soda", "cola", "coda", "data", "beta", "sofa",
-        "mono", "moto", "tiki", "koda", "kali", "gala", "hula", "kula", "puma", "yoga",
-        "zola", "zori", "veto", "vivo", "dino", "nemo", "hero", "zero", "memo", "demo",
-        "polo", "solo", "logo", "halo", "dojo", "judo", "sumo", "tofu", "guru", "vino",
-        "diva", "dodo", "silo", "peso", "lulu", "pita", "feta", "bobo", "brie", "fava",
-        "duma", "beto", "moku", "bozo", "tuna", "lava", "hobo", "kiwi", "mojo", "yoyo",
-        "sake", "wiki", "fiji", "bali", "kona", "poke", "cafe", "soho", "boho", "nano",
-        "zulu", "deli", "rose", "jedi", "yoda",
+        "miso", "taro", "boba", "kava", "soda", "cola", "coda", "data", "beta", "sofa", "mono",
+        "moto", "tiki", "koda", "kali", "gala", "hula", "kula", "puma", "yoga", "zola", "zori",
+        "veto", "vivo", "dino", "nemo", "hero", "zero", "memo", "demo", "polo", "solo", "logo",
+        "halo", "dojo", "judo", "sumo", "tofu", "guru", "vino", "diva", "dodo", "silo", "peso",
+        "lulu", "pita", "feta", "bobo", "brie", "fava", "duma", "beto", "moku", "bozo", "tuna",
+        "lava", "hobo", "kiwi", "mojo", "yoyo", "sake", "wiki", "fiji", "bali", "kona", "poke",
+        "cafe", "soho", "boho", "nano", "zulu", "deli", "rose", "jedi", "yoda",
         // Invented but natural-sounding
         "zumi", "reko", "valo", "kazu", "mero", "niru", "piko", "hazu", "toku", "veki",
     ]
@@ -505,8 +573,8 @@ fn gold_names() -> HashSet<&'static str> {
 
 fn banned_names() -> HashSet<&'static str> {
     [
-        "help", "exit", "quit", "sudo", "bash", "curl", "grep", "init",
-        "list", "send", "stop", "test", "meta",
+        "help", "exit", "quit", "sudo", "bash", "curl", "grep", "init", "list", "send", "stop",
+        "test", "meta",
     ]
     .into_iter()
     .collect()
@@ -526,7 +594,10 @@ fn score_name(name: &str, gold: &HashSet<&str>, banned: &HashSet<&str>) -> i32 {
     }
 
     // Friendly flow letters
-    if bytes.iter().any(|&c| matches!(c, b'l' | b'r' | b'n' | b'm')) {
+    if bytes
+        .iter()
+        .any(|&c| matches!(c, b'l' | b'r' | b'n' | b'm'))
+    {
         score += 40;
     }
 
@@ -570,7 +641,9 @@ fn build_name_pool(limit: usize) -> Vec<ScoredName> {
             for &c2 in CONSONANTS {
                 for &v2 in VOWELS {
                     let name = format!("{}{}{}{}", c1 as char, v1 as char, c2 as char, v2 as char);
-                    if banned.contains(name.as_str()) { continue; }
+                    if banned.contains(name.as_str()) {
+                        continue;
+                    }
                     let s = score_name(&name, &gold, &banned);
                     seen.insert(name.clone());
                     candidates.push(ScoredName { score: s, name });
@@ -584,7 +657,10 @@ fn build_name_pool(limit: usize) -> Vec<ScoredName> {
         if !seen.contains(name) && !banned.contains(name) {
             let s = score_name(name, &gold, &banned);
             seen.insert(name.to_string());
-            candidates.push(ScoredName { score: s, name: name.to_string() });
+            candidates.push(ScoredName {
+                score: s,
+                name: name.to_string(),
+            });
         }
     }
 
@@ -605,8 +681,14 @@ fn name_pool() -> &'static Vec<ScoredName> {
 fn is_too_similar(name: &str, alive_names: &HashSet<String>) -> bool {
     let name_bytes = name.as_bytes();
     for other in alive_names {
-        if other.len() != name.len() { continue; }
-        let diff = name_bytes.iter().zip(other.as_bytes()).filter(|(a, b)| a != b).count();
+        if other.len() != name.len() {
+            continue;
+        }
+        let diff = name_bytes
+            .iter()
+            .zip(other.as_bytes())
+            .filter(|(a, b)| a != b)
+            .count();
         if diff <= 2 {
             return true;
         }
@@ -692,8 +774,6 @@ pub fn hash_to_name(input: &str, collision_attempt: u32) -> String {
     hash_words[idx].name.clone()
 }
 
-// ==================== Name Generation (with flock) ====================
-
 /// Generate a unique instance name with flock-based reservation.
 /// Creates a placeholder row in DB to prevent TOCTOU races.
 pub fn generate_unique_name(db: &HcomDb) -> Result<String> {
@@ -725,7 +805,7 @@ pub fn generate_unique_name(db: &HcomDb) -> Result<String> {
         let stopped: Vec<String> = {
             let mut stmt = db.conn().prepare(
                 "SELECT DISTINCT instance FROM events
-                 WHERE type = 'life' AND json_extract(data, '$.action') = 'stopped'"
+                 WHERE type = 'life' AND json_extract(data, '$.action') = 'stopped'",
             )?;
             stmt.query_map([], |row| row.get(0))?
                 .filter_map(|r| r.ok())
@@ -734,10 +814,7 @@ pub fn generate_unique_name(db: &HcomDb) -> Result<String> {
         taken_names.extend(stopped);
 
         let name = allocate_name(
-            &|n| {
-                taken_names.contains(n)
-                    || db.get_instance_full(n).ok().flatten().is_some()
-            },
+            &|n| taken_names.contains(n) || db.get_instance_full(n).ok().flatten().is_some(),
             &alive_names,
             200,
             1200,
@@ -764,23 +841,32 @@ pub fn generate_unique_name(db: &HcomDb) -> Result<String> {
     result
 }
 
-// ==================== Instance I/O ====================
-
 /// Update instance position atomically.
 /// If instance doesn't exist, UPDATE silently affects 0 rows.
-pub fn update_instance_position(db: &HcomDb, name: &str, updates: &serde_json::Map<String, serde_json::Value>) {
+pub fn update_instance_position(
+    db: &HcomDb,
+    name: &str,
+    updates: &serde_json::Map<String, serde_json::Value>,
+) {
     // Convert booleans to integers for SQLite
     let mut update_copy = updates.clone();
     for bool_field in &["tcp_mode", "background", "name_announced"] {
         if let Some(val) = update_copy.get(*bool_field) {
             if let Some(b) = val.as_bool() {
-                update_copy.insert((*bool_field).to_string(), serde_json::json!(if b { 1 } else { 0 }));
+                update_copy.insert(
+                    (*bool_field).to_string(),
+                    serde_json::json!(if b { 1 } else { 0 }),
+                );
             }
         }
     }
 
     if let Err(e) = db.update_instance_fields(name, &update_copy) {
-        crate::log::log_error("core", "db.error", &format!("update_instance_position: {} - {}", name, e));
+        crate::log::log_error(
+            "core",
+            "db.error",
+            &format!("update_instance_position: {} - {}", name, e),
+        );
     }
 }
 
@@ -790,12 +876,21 @@ pub fn capture_and_store_launch_context(db: &HcomDb, instance_name: &str) {
     let new_ctx = capture_context();
 
     // Preserve fields from prior context that can't be recaptured in hook env
-    let preserve_keys = ["pane_id", "terminal_id", "terminal_preset", "kitty_listen_on"];
+    let preserve_keys = [
+        "pane_id",
+        "terminal_id",
+        "terminal_preset",
+        "kitty_listen_on",
+    ];
     let mut ctx = new_ctx;
 
     let missing: Vec<&str> = preserve_keys
         .iter()
-        .filter(|k| ctx.get(**k).and_then(|v| v.as_str()).is_none_or(|s| s.is_empty()))
+        .filter(|k| {
+            ctx.get(**k)
+                .and_then(|v| v.as_str())
+                .is_none_or(|s| s.is_empty())
+        })
         .copied()
         .collect();
 
@@ -850,16 +945,37 @@ fn capture_context() -> serde_json::Map<String, serde_json::Value> {
 
     // Env vars (only include if set)
     let env_keys = [
-        "TERM_PROGRAM", "TERM_SESSION_ID", "WINDOWID",
-        "ITERM_SESSION_ID", "KITTY_WINDOW_ID", "KITTY_PID", "KITTY_LISTEN_ON",
-        "ALACRITTY_WINDOW_ID", "WEZTERM_PANE",
-        "GNOME_TERMINAL_SCREEN", "KONSOLE_DBUS_WINDOW",
-        "TERMINATOR_UUID", "TILIX_ID", "GUAKE_TAB_UUID",
-        "WT_SESSION", "ConEmuHWND",
-        "TMUX_PANE", "STY", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID",
-        "SSH_TTY", "SSH_CONNECTION", "WSL_DISTRO_NAME",
-        "VSCODE_PID", "CURSOR_AGENT", "INSIDE_EMACS", "NVIM_LISTEN_ADDRESS",
-        "CODESPACE_NAME", "GITPOD_WORKSPACE_ID", "CLOUD_SHELL", "REPL_ID",
+        "TERM_PROGRAM",
+        "TERM_SESSION_ID",
+        "WINDOWID",
+        "ITERM_SESSION_ID",
+        "KITTY_WINDOW_ID",
+        "KITTY_PID",
+        "KITTY_LISTEN_ON",
+        "ALACRITTY_WINDOW_ID",
+        "WEZTERM_PANE",
+        "GNOME_TERMINAL_SCREEN",
+        "KONSOLE_DBUS_WINDOW",
+        "TERMINATOR_UUID",
+        "TILIX_ID",
+        "GUAKE_TAB_UUID",
+        "WT_SESSION",
+        "ConEmuHWND",
+        "TMUX_PANE",
+        "STY",
+        "ZELLIJ_SESSION_NAME",
+        "ZELLIJ_PANE_ID",
+        "SSH_TTY",
+        "SSH_CONNECTION",
+        "WSL_DISTRO_NAME",
+        "VSCODE_PID",
+        "CURSOR_AGENT",
+        "INSIDE_EMACS",
+        "NVIM_LISTEN_ADDRESS",
+        "CODESPACE_NAME",
+        "GITPOD_WORKSPACE_ID",
+        "CLOUD_SHELL",
+        "REPL_ID",
     ];
     let mut env_map = serde_json::Map::new();
     for key in &env_keys {
@@ -911,19 +1027,20 @@ fn capture_context() -> serde_json::Map<String, serde_json::Value> {
     ctx
 }
 
-// ==================== Status Functions ====================
-
 /// Set instance status with timestamp and log status change event.
 pub fn set_status(
     db: &HcomDb,
     instance_name: &str,
     status: &str,
     context: &str,
-    detail: &str,
-    msg_ts: &str,
-    launcher_override: Option<&str>,
-    batch_id_override: Option<&str>,
+    upd: StatusUpdate<'_>,
 ) {
+    let StatusUpdate {
+        detail,
+        msg_ts,
+        launcher_override,
+        batch_id_override,
+    } = upd;
     // Check if first status update
     let (current_data, db_error) = match db.get_instance_full(instance_name) {
         Ok(data) => (data, false),
@@ -993,7 +1110,11 @@ pub fn set_status(
         if launcher != "unknown" {
             if let Some(ref bid) = batch_id {
                 if let Err(e) = db.check_batch_completion(&launcher, bid) {
-                    crate::log::log_error("core", "db.error", &format!("batch notification: {}", e));
+                    crate::log::log_error(
+                        "core",
+                        "db.error",
+                        &format!("batch notification: {}", e),
+                    );
                 }
             }
         }
@@ -1036,15 +1157,19 @@ pub fn notify_instance_endpoints(db: &HcomDb, instance_name: &str, kinds: &[&str
             "SELECT port FROM notify_endpoints WHERE instance = ? AND kind IN ({})",
             placeholders
         );
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(instance_name.to_string())];
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(instance_name.to_string())];
         for k in kinds {
             params.push(Box::new(k.to_string()));
         }
         db.conn()
             .prepare(&sql)
             .and_then(|mut stmt| {
-                stmt.query_map(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), |row| row.get::<_, i64>(0))
-                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                stmt.query_map(
+                    rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
             })
             .unwrap_or_default()
     };
@@ -1053,10 +1178,7 @@ pub fn notify_instance_endpoints(db: &HcomDb, instance_name: &str, kinds: &[&str
         if port > 0 && port <= 65535 {
             let addr = format!("127.0.0.1:{}", port);
             if let Ok(addr) = addr.parse() {
-                let _ = TcpStream::connect_timeout(
-                    &addr,
-                    std::time::Duration::from_millis(100),
-                );
+                let _ = TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(100));
             }
         }
     }
@@ -1072,9 +1194,10 @@ pub fn notify_instance_with_db(db: &HcomDb, instance_name: &str) -> Result<()> {
 pub fn notify_all_instances(db: &HcomDb) {
     use std::net::TcpStream;
 
-    let Ok(mut stmt) = db.conn().prepare(
-        "SELECT DISTINCT port FROM notify_endpoints WHERE port > 0"
-    ) else {
+    let Ok(mut stmt) = db
+        .conn()
+        .prepare("SELECT DISTINCT port FROM notify_endpoints WHERE port > 0")
+    else {
         return;
     };
 
@@ -1096,8 +1219,6 @@ pub fn notify_all_instances(db: &HcomDb) {
         }
     }
 }
-
-// ==================== Binding Functions ====================
 
 /// Bind session_id to canonical instance for process_id.
 /// Handles 4 paths: canonical exists (with placeholder merge/switch), placeholder bind,
@@ -1151,7 +1272,10 @@ pub fn bind_session_to_process(
         crate::log::log_info(
             "binding",
             "bind_session_to_process.canonical_exists",
-            &format!("canonical={}, placeholder={:?}", canonical_name, placeholder_name),
+            &format!(
+                "canonical={}, placeholder={:?}",
+                canonical_name, placeholder_name
+            ),
         );
 
         // Reset last_stop on resume
@@ -1163,7 +1287,11 @@ pub fn bind_session_to_process(
             if ph_name != canonical_name {
                 // Always migrate notify_endpoints
                 if let Err(e) = db.migrate_notify_endpoints(ph_name, canonical_name) {
-                    crate::log::log_error("binding", "bind_canonical.migrate_endpoints", &format!("{e}"));
+                    crate::log::log_error(
+                        "binding",
+                        "bind_canonical.migrate_endpoints",
+                        &format!("{e}"),
+                    );
                 }
 
                 let is_true_placeholder = placeholder_data
@@ -1178,14 +1306,16 @@ pub fn bind_session_to_process(
                             resume_updates.insert("tag".into(), serde_json::json!(tag));
                         }
                         if ph_data.background != 0 {
-                            resume_updates.insert("background".into(), serde_json::json!(ph_data.background));
+                            resume_updates
+                                .insert("background".into(), serde_json::json!(ph_data.background));
                         }
                         if let Some(ref args) = ph_data.launch_args {
                             resume_updates.insert("launch_args".into(), serde_json::json!(args));
                         }
                         // Reset status_context for ready event
                         if std::env::var("HCOM_LAUNCHED").as_deref() == Ok("1") {
-                            resume_updates.insert("status_context".into(), serde_json::json!("new"));
+                            resume_updates
+                                .insert("status_context".into(), serde_json::json!("new"));
                         }
                     }
 
@@ -1195,21 +1325,43 @@ pub fn bind_session_to_process(
                         Ok(false) => {
                             // Not found — rollback notify_endpoints migration
                             if let Err(e) = db.migrate_notify_endpoints(canonical_name, ph_name) {
-                                crate::log::log_error("binding", "bind_canonical.rollback_endpoints", &format!("{e}"));
+                                crate::log::log_error(
+                                    "binding",
+                                    "bind_canonical.rollback_endpoints",
+                                    &format!("{e}"),
+                                );
                             }
                         }
                         Err(e) => {
-                            crate::log::log_error("binding", "bind_canonical.delete_placeholder", &format!("{e}"));
+                            crate::log::log_error(
+                                "binding",
+                                "bind_canonical.delete_placeholder",
+                                &format!("{e}"),
+                            );
                             if let Err(e) = db.migrate_notify_endpoints(canonical_name, ph_name) {
-                                crate::log::log_error("binding", "bind_canonical.rollback_endpoints", &format!("{e}"));
+                                crate::log::log_error(
+                                    "binding",
+                                    "bind_canonical.rollback_endpoints",
+                                    &format!("{e}"),
+                                );
                             }
                         }
                     }
                 } else {
                     // Path 1b: Session switch — mark old instance inactive
-                    set_status(db, ph_name, ST_INACTIVE, "exit:session_switch", "", "", None, None);
+                    set_status(
+                        db,
+                        ph_name,
+                        ST_INACTIVE,
+                        "exit:session_switch",
+                        Default::default(),
+                    );
                     if let Err(e) = db.delete_session_bindings_for_instance(ph_name) {
-                        crate::log::log_error("binding", "bind_canonical.delete_session_bindings", &format!("{e}"));
+                        crate::log::log_error(
+                            "binding",
+                            "bind_canonical.delete_session_bindings",
+                            &format!("{e}"),
+                        );
                     }
                 }
             }
@@ -1220,7 +1372,11 @@ pub fn bind_session_to_process(
 
         if let Some(pid) = process_id {
             if let Err(e) = db.set_process_binding(pid, session_id, canonical_name) {
-                crate::log::log_error("binding", "bind_canonical.set_process_binding", &format!("{e}"));
+                crate::log::log_error(
+                    "binding",
+                    "bind_canonical.set_process_binding",
+                    &format!("{e}"),
+                );
             }
         }
 
@@ -1245,11 +1401,19 @@ pub fn bind_session_to_process(
         update_instance_position(db, ph_name, &updates);
 
         if let Err(e) = db.rebind_session(session_id, ph_name) {
-            crate::log::log_error("binding", "bind_placeholder.rebind_session", &format!("{e}"));
+            crate::log::log_error(
+                "binding",
+                "bind_placeholder.rebind_session",
+                &format!("{e}"),
+            );
         }
         if let Some(pid) = process_id {
             if let Err(e) = db.set_process_binding(pid, session_id, ph_name) {
-                crate::log::log_error("binding", "bind_placeholder.set_process_binding", &format!("{e}"));
+                crate::log::log_error(
+                    "binding",
+                    "bind_placeholder.set_process_binding",
+                    &format!("{e}"),
+                );
             }
         }
 
@@ -1261,9 +1425,8 @@ pub fn bind_session_to_process(
     None
 }
 
-// ==================== Instance Initialization ====================
-
 /// Initialize instance in DB with required fields (idempotent).
+#[allow(clippy::too_many_arguments)]
 pub fn initialize_instance_in_position_file(
     db: &HcomDb,
     instance_name: &str,
@@ -1364,10 +1527,13 @@ pub fn initialize_instance_in_position_file(
             data.insert("directory".into(), serde_json::json!(cwd));
             data.insert("last_stop".into(), serde_json::json!(0));
             data.insert("created_at".into(), serde_json::json!(now));
-            data.insert("session_id".into(), match session_id {
-                Some(s) if !s.is_empty() => serde_json::json!(s),
-                _ => serde_json::Value::Null,
-            });
+            data.insert(
+                "session_id".into(),
+                match session_id {
+                    Some(s) if !s.is_empty() => serde_json::json!(s),
+                    _ => serde_json::Value::Null,
+                },
+            );
             data.insert("transcript_path".into(), serde_json::json!(""));
             data.insert("name_announced".into(), serde_json::json!(0));
             data.insert("tag".into(), serde_json::Value::Null);
@@ -1375,7 +1541,10 @@ pub fn initialize_instance_in_position_file(
             data.insert("status_time".into(), serde_json::json!(now_epoch_i64()));
             data.insert("status_context".into(), serde_json::json!("new"));
             data.insert("tool".into(), serde_json::json!(tool.unwrap_or("claude")));
-            data.insert("background".into(), serde_json::json!(if background { 1 } else { 0 }));
+            data.insert(
+                "background".into(),
+                serde_json::json!(if background { 1 } else { 0 }),
+            );
 
             // Set tag: use provided tag, or fall back to config tag for real instances
             if let Some(t) = tag {
@@ -1413,7 +1582,8 @@ pub fn initialize_instance_in_position_file(
             match db.save_instance_named(instance_name, &data) {
                 Ok(true) => {
                     // Log creation event
-                    let launcher = std::env::var("HCOM_LAUNCHED_BY").unwrap_or_else(|_| "unknown".to_string());
+                    let launcher =
+                        std::env::var("HCOM_LAUNCHED_BY").unwrap_or_else(|_| "unknown".to_string());
                     let event_data = serde_json::json!({
                         "action": "created",
                         "by": launcher,
@@ -1444,7 +1614,11 @@ pub fn create_orphaned_pty_identity(
     let name = match generate_unique_name(db) {
         Ok(n) => n,
         Err(e) => {
-            crate::log::log_error("instances", "create_orphaned_pty_identity.name_gen", &e.to_string());
+            crate::log::log_error(
+                "instances",
+                "create_orphaned_pty_identity.name_gen",
+                &e.to_string(),
+            );
             return None;
         }
     };
@@ -1483,8 +1657,6 @@ pub fn create_orphaned_pty_identity(
     Some(name)
 }
 
-// ==================== Cleanup Functions ====================
-
 /// Delete placeholder instances that have been launching too long.
 pub fn cleanup_stale_placeholders(db: &HcomDb) -> i32 {
     let mut deleted = 0;
@@ -1492,7 +1664,9 @@ pub fn cleanup_stale_placeholders(db: &HcomDb) -> i32 {
 
     if let Ok(instances) = db.iter_instances_full() {
         for data in &instances {
-            if !is_launching_placeholder(data) { continue; }
+            if !is_launching_placeholder(data) {
+                continue;
+            }
             let created_at = data.created_at;
             if created_at > 0.0 && (now - created_at) > CLEANUP_PLACEHOLDER_THRESHOLD as f64 {
                 crate::hooks::common::stop_instance(db, &data.name, "system", "stale_cleanup");
@@ -1524,14 +1698,18 @@ pub fn cleanup_stale_instances(
         for data in &instances {
             let computed = get_instance_status(data, db);
 
-            if computed.status != ST_INACTIVE { continue; }
+            if computed.status != ST_INACTIVE {
+                continue;
+            }
 
             let context = &computed.context;
             let age = computed.age_seconds;
 
             // Exit contexts: 1min cleanup
-            if matches!(context.as_str(), "killed" | "closed" | "timeout" | "interrupted" | "session_switch")
-                && age > 60
+            if matches!(
+                context.as_str(),
+                "killed" | "closed" | "timeout" | "interrupted" | "session_switch"
+            ) && age > 60
             {
                 crate::hooks::common::stop_instance(db, &data.name, "system", "exit_cleanup");
                 deleted += 1;
@@ -1560,7 +1738,8 @@ pub fn cleanup_stale_instances(
 /// Delete remote instance rows whose device hasn't pushed in >90s.
 fn cleanup_stale_remote_instances(db: &HcomDb) {
     let now = now_epoch_f64();
-    let sync_map: std::collections::HashMap<String, String> = db.kv_prefix("relay_sync_time_")
+    let sync_map: std::collections::HashMap<String, String> = db
+        .kv_prefix("relay_sync_time_")
         .unwrap_or_default()
         .into_iter()
         .collect();
@@ -1584,7 +1763,11 @@ fn cleanup_stale_remote_instances(db: &HcomDb) {
             ) {
                 crate::log::log_warn("cleanup", "remote_stale_cleanup_fail", &e.to_string());
             } else {
-                crate::log::log_info("cleanup", "remote_device_stale", &device_id[..8.min(device_id.len())]);
+                crate::log::log_info(
+                    "cleanup",
+                    "remote_device_stale",
+                    &device_id[..8.min(device_id.len())],
+                );
             }
         }
     }
@@ -1623,8 +1806,6 @@ pub fn resolve_instance_from_binding(
     None
 }
 
-// ==================== Auto-subscribe ====================
-
 /// Auto-subscribe instance to default event subscriptions from config.
 /// Called during instance creation.
 fn auto_subscribe_defaults(db: &HcomDb, instance_name: &str, tool: &str) {
@@ -1653,20 +1834,31 @@ fn auto_subscribe_defaults(db: &HcomDb, instance_name: &str, tool: &str) {
         ("blocked", vec![("status", "blocked")]),
     ]);
 
-    for preset in config.auto_subscribe.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    for preset in config
+        .auto_subscribe
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         if let Some(flag_pairs) = preset_to_flags.get(preset) {
             let mut filters: HashMap<String, Vec<String>> = HashMap::new();
             for (key, val) in flag_pairs {
-                filters.entry(key.to_string()).or_default().push(val.to_string());
+                filters
+                    .entry(key.to_string())
+                    .or_default()
+                    .push(val.to_string());
             }
             let _ = crate::commands::events::create_filter_subscription(
-                db, &filters, &[], instance_name, false, true,
+                db,
+                &filters,
+                &[],
+                instance_name,
+                false,
+                true,
             );
         }
     }
 }
-
-// ==================== Tests ====================
 
 #[cfg(test)]
 mod tests {
@@ -1680,7 +1872,11 @@ mod tests {
 
         let temp_dir = std::env::temp_dir();
         let test_id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let db_path = temp_dir.join(format!("test_instances_{}_{}.db", std::process::id(), test_id));
+        let db_path = temp_dir.join(format!(
+            "test_instances_{}_{}.db",
+            std::process::id(),
+            test_id
+        ));
 
         let conn = Connection::open(&db_path).unwrap();
         conn.execute_batch(
@@ -1765,8 +1961,6 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
     }
 
-    // ---------- Name Generation ----------
-
     #[test]
     fn test_name_pool_populated() {
         let pool = name_pool();
@@ -1813,15 +2007,12 @@ mod tests {
 
     #[test]
     fn test_allocate_name_avoids_taken() {
-        let taken: HashSet<String> = ["luna", "nova", "kira"].iter().map(|s| s.to_string()).collect();
+        let taken: HashSet<String> = ["luna", "nova", "kira"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let alive = taken.clone();
-        let name = allocate_name(
-            &|n| taken.contains(n),
-            &alive,
-            200,
-            1200,
-            900.0,
-        ).unwrap();
+        let name = allocate_name(&|n| taken.contains(n), &alive, 200, 1200, 900.0).unwrap();
         assert!(!taken.contains(&name));
     }
 
@@ -1838,8 +2029,6 @@ mod tests {
         let n2 = hash_to_name("device-123", 1);
         assert_ne!(n1, n2);
     }
-
-    // ---------- Status Computation ----------
 
     #[test]
     fn test_status_launching_new() {
@@ -1915,7 +2104,11 @@ mod tests {
 
         let result = get_instance_status(&data, &db);
         assert_eq!(result.status, ST_INACTIVE);
-        assert!(result.context.starts_with("stale"), "context should be stale, got: {}", result.context);
+        assert!(
+            result.context.starts_with("stale"),
+            "context should be stale, got: {}",
+            result.context
+        );
         cleanup(path);
     }
 
@@ -1959,21 +2152,35 @@ mod tests {
         cleanup(path);
     }
 
-    // ---------- Status Description ----------
-
     #[test]
     fn test_status_descriptions() {
-        assert_eq!(get_status_description(ST_ACTIVE, "tool:Bash"), "active: Bash");
-        assert_eq!(get_status_description(ST_ACTIVE, "deliver:luna"), "active: msg from luna");
+        assert_eq!(
+            get_status_description(ST_ACTIVE, "tool:Bash"),
+            "active: Bash"
+        );
+        assert_eq!(
+            get_status_description(ST_ACTIVE, "deliver:luna"),
+            "active: msg from luna"
+        );
         assert_eq!(get_status_description(ST_ACTIVE, ""), "active");
         assert_eq!(get_status_description(ST_LISTENING, ""), "listening");
-        assert_eq!(get_status_description(ST_LISTENING, "tui:not-ready"), "listening: blocked");
-        assert_eq!(get_status_description(ST_BLOCKED, ""), "blocked: permission needed");
-        assert_eq!(get_status_description(ST_INACTIVE, "stale:listening"), "inactive: stale");
-        assert_eq!(get_status_description(ST_INACTIVE, "exit:timeout"), "inactive: timeout");
+        assert_eq!(
+            get_status_description(ST_LISTENING, "tui:not-ready"),
+            "listening: blocked"
+        );
+        assert_eq!(
+            get_status_description(ST_BLOCKED, ""),
+            "blocked: permission needed"
+        );
+        assert_eq!(
+            get_status_description(ST_INACTIVE, "stale:listening"),
+            "inactive: stale"
+        );
+        assert_eq!(
+            get_status_description(ST_INACTIVE, "exit:timeout"),
+            "inactive: timeout"
+        );
     }
-
-    // ---------- Helper Predicates ----------
 
     #[test]
     fn test_is_launching_placeholder() {
@@ -2006,8 +2213,6 @@ mod tests {
         assert!(is_remote_instance(&remote));
     }
 
-    // ---------- Display Name ----------
-
     #[test]
     fn test_get_full_name() {
         let plain = InstanceRow {
@@ -2025,7 +2230,32 @@ mod tests {
         assert_eq!(get_full_name(&tagged), "team-luna");
     }
 
-    // ---------- Running Tasks ----------
+    #[test]
+    fn test_resolve_display_name_or_stopped_tagged_snapshot() {
+        let (db, _path) = setup_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO events (timestamp, type, instance, data)
+                 VALUES (strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'life', 'luna', ?1)",
+                rusqlite::params![serde_json::json!({
+                    "action": "stopped",
+                    "snapshot": {
+                        "tag": "team"
+                    }
+                })
+                .to_string()],
+            )
+            .unwrap();
+
+        assert_eq!(
+            resolve_display_name_or_stopped(&db, "team-luna").as_deref(),
+            Some("luna")
+        );
+        assert_eq!(
+            resolve_display_name_or_stopped(&db, "luna").as_deref(),
+            Some("luna")
+        );
+    }
 
     #[test]
     fn test_parse_running_tasks() {
@@ -2037,20 +2267,6 @@ mod tests {
         assert!(rt.active);
         assert_eq!(rt.subagents.len(), 1);
     }
-
-    // ---------- Format Age ----------
-
-    #[test]
-    fn test_format_age() {
-        assert_eq!(format_age(0), "now");
-        assert_eq!(format_age(-5), "now");
-        assert_eq!(format_age(30), "30s");
-        assert_eq!(format_age(90), "1m");
-        assert_eq!(format_age(3700), "1h");
-        assert_eq!(format_age(90000), "1d");
-    }
-
-    // ---------- bind_session_to_process ----------
 
     #[test]
     fn test_bind_session_path2_placeholder() {
@@ -2148,7 +2364,8 @@ mod tests {
         ph_data.insert("status".into(), serde_json::json!("listening"));
         db.save_instance_named("temp", &ph_data).unwrap();
         db.rebind_session("sid-old", "temp").unwrap();
-        db.set_process_binding("pid-123", "sid-old", "temp").unwrap();
+        db.set_process_binding("pid-123", "sid-old", "temp")
+            .unwrap();
 
         let result = bind_session_to_process(&db, "sid-789", Some("pid-123"));
         assert_eq!(result, Some("miso".to_string()));
@@ -2162,7 +2379,10 @@ mod tests {
         assert_eq!(db.get_session_binding("sid-old").unwrap(), None);
 
         // Process binding now points to canonical.
-        assert_eq!(db.get_process_binding("pid-123").unwrap(), Some("miso".to_string()));
+        assert_eq!(
+            db.get_process_binding("pid-123").unwrap(),
+            Some("miso".to_string())
+        );
 
         cleanup(path);
     }
@@ -2178,8 +2398,6 @@ mod tests {
 
         cleanup(path);
     }
-
-    // ---------- Utility ----------
 
     fn default_instance() -> InstanceRow {
         InstanceRow {
@@ -2215,8 +2433,6 @@ mod tests {
         }
     }
 
-    // ---------- create_orphaned_pty_identity ----------
-
     #[test]
     fn test_create_orphaned_pty_identity_basic() {
         crate::config::Config::init();
@@ -2232,7 +2448,10 @@ mod tests {
         assert_eq!(inst.tool, "claude");
 
         // Verify session binding created
-        assert_eq!(db.get_session_binding("sess-orphan").unwrap(), Some(name.clone()));
+        assert_eq!(
+            db.get_session_binding("sess-orphan").unwrap(),
+            Some(name.clone())
+        );
 
         // Verify process binding created
         assert_eq!(db.get_process_binding("pid-orphan").unwrap(), Some(name));
@@ -2257,8 +2476,6 @@ mod tests {
 
         cleanup(path);
     }
-
-    // ---------- cleanup_stale_placeholders ----------
 
     #[test]
     fn test_cleanup_stale_placeholders_deletes_old() {
@@ -2323,8 +2540,6 @@ mod tests {
 
         cleanup(path);
     }
-
-    // ---------- resolve_instance_from_binding ----------
 
     #[test]
     fn test_resolve_from_binding_process_binding() {
@@ -2422,8 +2637,6 @@ mod tests {
         cleanup(path);
     }
 
-    // ---------- Session binding CASCADE on instance delete ----------
-
     #[test]
     fn test_session_binding_cascade_on_instance_delete() {
         crate::config::Config::init();
@@ -2439,7 +2652,10 @@ mod tests {
         db.rebind_session("sess-1", "luna").unwrap();
 
         // Confirm binding exists
-        assert_eq!(db.get_session_binding("sess-1").unwrap(), Some("luna".to_string()));
+        assert_eq!(
+            db.get_session_binding("sess-1").unwrap(),
+            Some("luna".to_string())
+        );
 
         // Delete instance — CASCADE should remove session binding
         db.delete_instance("luna").unwrap();
@@ -2447,8 +2663,6 @@ mod tests {
 
         cleanup(path);
     }
-
-    // ---------- Hamming distance with many alive instances ----------
 
     #[test]
     fn test_hamming_distance_with_many_alive() {
@@ -2478,8 +2692,6 @@ mod tests {
         assert!(!is_too_similar("lunaa", &alive));
         assert!(!is_too_similar("l", &alive));
     }
-
-    // ---------- bind_session idempotency (concurrent hook scenario) ----------
 
     #[test]
     fn test_bind_session_idempotent_same_session() {
@@ -2511,8 +2723,6 @@ mod tests {
         cleanup(path);
     }
 
-    // ---------- Auto-subscribe ----------
-
     #[test]
     fn test_auto_subscribe_creates_collision_subscription() {
         let (db, path) = setup_test_db();
@@ -2523,7 +2733,12 @@ mod tests {
         filters.insert("collision".to_string(), vec!["1".to_string()]);
 
         let result = crate::commands::events::create_filter_subscription(
-            &db, &filters, &[], "test-agent", false, true,
+            &db,
+            &filters,
+            &[],
+            "test-agent",
+            false,
+            true,
         );
         assert_eq!(result, 0, "subscription creation should succeed");
 
@@ -2551,7 +2766,12 @@ mod tests {
 
         // Silent mode should not panic or produce errors
         let result = crate::commands::events::create_filter_subscription(
-            &db, &filters, &[], "test-agent", false, true,
+            &db,
+            &filters,
+            &[],
+            "test-agent",
+            false,
+            true,
         );
         assert_eq!(result, 0);
 
@@ -2568,13 +2788,23 @@ mod tests {
 
         // First call creates
         let r1 = crate::commands::events::create_filter_subscription(
-            &db, &filters, &[], "test-agent", false, true,
+            &db,
+            &filters,
+            &[],
+            "test-agent",
+            false,
+            true,
         );
         assert_eq!(r1, 0);
 
         // Second call with same filters is a no-op (duplicate)
         let r2 = crate::commands::events::create_filter_subscription(
-            &db, &filters, &[], "test-agent", false, true,
+            &db,
+            &filters,
+            &[],
+            "test-agent",
+            false,
+            true,
         );
         assert_eq!(r2, 0);
 

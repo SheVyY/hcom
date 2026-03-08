@@ -3,8 +3,9 @@
 //! - Scope and intent validation
 //! - @mention matching with prefix/underscore/remote rules
 
-use crate::shared::constants::{extract_mentions, SenderKind};
 use crate::shared::SenderIdentity;
+use crate::shared::constants::extract_mentions;
+use crate::shared::identity::SenderKind;
 
 /// Valid scope values for message routing.
 pub const VALID_SCOPES: &[&str] = &["broadcast", "mentions"];
@@ -76,14 +77,15 @@ pub fn is_mentioned(text: &str, name: &str, tag: Option<&str>) -> bool {
         } else {
             // Bare mention — only match local instances (no : in full name)
             // Don't match across underscore boundary (reserved for subagent hierarchy)
-            if !full_name.contains(':') && full_name.to_lowercase().starts_with(&mention_lower)
-                && (full_name.len() == mention.len()
-                    || full_name.as_bytes()[mention.len()] != b'_')
+            if !full_name.contains(':')
+                && full_name.to_lowercase().starts_with(&mention_lower)
+                && (full_name.len() == mention.len() || full_name.as_bytes()[mention.len()] != b'_')
             {
                 return true;
             }
             // Also check base name match (e.g., @luna matches api-luna)
-            if !name.contains(':') && name.to_lowercase().starts_with(&mention_lower)
+            if !name.contains(':')
+                && name.to_lowercase().starts_with(&mention_lower)
                 && (name.len() == mention.len() || name.as_bytes()[mention.len()] != b'_')
             {
                 return true;

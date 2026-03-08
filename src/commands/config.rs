@@ -51,24 +51,84 @@ pub struct ConfigArgs {
 pub const CONFIG_KEYS: &[(&str, &str, &str)] = &[
     ("HCOM_TAG", "Group tag for launched instances", "string"),
     ("HCOM_HINTS", "Text injected with all messages", "string"),
-    ("HCOM_NOTES", "One-time notes appended at bootstrap", "string"),
-    ("HCOM_TIMEOUT", "Idle timeout in seconds (default: 86400)", "integer"),
-    ("HCOM_SUBAGENT_TIMEOUT", "Timeout for Claude subagents in seconds (default: 30)", "integer"),
-    ("HCOM_CLAUDE_ARGS", "Default args for claude on launch", "string"),
-    ("HCOM_GEMINI_ARGS", "Default args for gemini on launch", "string"),
-    ("HCOM_CODEX_ARGS", "Default args for codex on launch", "string"),
-    ("HCOM_OPENCODE_ARGS", "Default args for opencode on launch", "string"),
-    ("HCOM_CODEX_SANDBOX_MODE", "Codex sandbox mode (e.g., off)", "string"),
-    ("HCOM_GEMINI_SYSTEM_PROMPT", "System prompt for gemini on launch", "string"),
-    ("HCOM_CODEX_SYSTEM_PROMPT", "System prompt for codex on launch", "string"),
-    ("HCOM_TERMINAL", "Terminal preset for spawning agent panes", "string"),
-    ("HCOM_AUTO_APPROVE", "Auto-approve safe hcom commands (true/false)", "boolean"),
-    ("HCOM_AUTO_SUBSCRIBE", "Auto-subscribe event presets (comma-separated)", "string"),
-    ("HCOM_NAME_EXPORT", "Export instance name to custom env var", "string"),
+    (
+        "HCOM_NOTES",
+        "One-time notes appended at bootstrap",
+        "string",
+    ),
+    (
+        "HCOM_TIMEOUT",
+        "Idle timeout in seconds (default: 86400)",
+        "integer",
+    ),
+    (
+        "HCOM_SUBAGENT_TIMEOUT",
+        "Timeout for Claude subagents in seconds (default: 30)",
+        "integer",
+    ),
+    (
+        "HCOM_CLAUDE_ARGS",
+        "Default args for claude on launch",
+        "string",
+    ),
+    (
+        "HCOM_GEMINI_ARGS",
+        "Default args for gemini on launch",
+        "string",
+    ),
+    (
+        "HCOM_CODEX_ARGS",
+        "Default args for codex on launch",
+        "string",
+    ),
+    (
+        "HCOM_OPENCODE_ARGS",
+        "Default args for opencode on launch",
+        "string",
+    ),
+    (
+        "HCOM_CODEX_SANDBOX_MODE",
+        "Codex sandbox mode (e.g., off)",
+        "string",
+    ),
+    (
+        "HCOM_GEMINI_SYSTEM_PROMPT",
+        "System prompt for gemini on launch",
+        "string",
+    ),
+    (
+        "HCOM_CODEX_SYSTEM_PROMPT",
+        "System prompt for codex on launch",
+        "string",
+    ),
+    (
+        "HCOM_TERMINAL",
+        "Terminal preset for spawning agent panes",
+        "string",
+    ),
+    (
+        "HCOM_AUTO_APPROVE",
+        "Auto-approve safe hcom commands (true/false)",
+        "boolean",
+    ),
+    (
+        "HCOM_AUTO_SUBSCRIBE",
+        "Auto-subscribe event presets (comma-separated)",
+        "string",
+    ),
+    (
+        "HCOM_NAME_EXPORT",
+        "Export instance name to custom env var",
+        "string",
+    ),
     ("HCOM_RELAY", "Relay MQTT broker URL", "string"),
     ("HCOM_RELAY_ID", "Relay group identifier", "string"),
     ("HCOM_RELAY_TOKEN", "Relay authentication token", "string"),
-    ("HCOM_RELAY_ENABLED", "Enable relay sync (true/false)", "boolean"),
+    (
+        "HCOM_RELAY_ENABLED",
+        "Enable relay sync (true/false)",
+        "boolean",
+    ),
 ];
 
 /// Instance-level config keys.
@@ -76,7 +136,10 @@ const INSTANCE_KEYS: &[(&str, &str)] = &[
     ("tag", "Instance-specific tag (changes display name)"),
     ("timeout", "Instance-specific idle timeout in seconds"),
     ("hints", "Instance-specific hints (injected with messages)"),
-    ("subagent_timeout", "Instance-specific subagent timeout in seconds"),
+    (
+        "subagent_timeout",
+        "Instance-specific subagent timeout in seconds",
+    ),
 ];
 
 // ── Flag Parsing ─────────────────────────────────────────────────────────
@@ -193,10 +256,7 @@ fn config_set(key: &str, value: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to parse config.toml: {e}"))?;
 
     // Map HCOM_KEY to field name, then to nested TOML path
-    let field_name = key
-        .strip_prefix("HCOM_")
-        .unwrap_or(key)
-        .to_lowercase();
+    let field_name = key.strip_prefix("HCOM_").unwrap_or(key).to_lowercase();
 
     if let Some(dotted_path) = toml_path_for_key(&field_name) {
         set_nested_toml(&mut doc, dotted_path, value);
@@ -227,10 +287,7 @@ fn config_get(key: &str) -> (String, &'static str) {
     }
 
     // Map to field name and nested TOML path
-    let field_name = key
-        .strip_prefix("HCOM_")
-        .unwrap_or(key)
-        .to_lowercase();
+    let field_name = key.strip_prefix("HCOM_").unwrap_or(key).to_lowercase();
 
     let content = load_config_content();
     if let Ok(table) = content.parse::<toml::Table>() {
@@ -247,14 +304,16 @@ fn config_get(key: &str) -> (String, &'static str) {
                 return (val_str, "toml");
             }
         }
-        // Fallback: try flat key (for legacy configs)
+        // Fallback: try flat key (for legacy configs) — skip non-scalar values
+        // (e.g. table.get("terminal") returns the whole [terminal] section when
+        // terminal.active is not set; returning that would be a display bug)
         if let Some(val) = table.get(&field_name) {
             let val_str = match val {
                 toml::Value::String(s) => s.clone(),
                 toml::Value::Integer(n) => n.to_string(),
                 toml::Value::Boolean(b) => b.to_string(),
                 toml::Value::Float(f) => f.to_string(),
-                other => other.to_string(),
+                _ => return ("".to_string(), "toml"), // table/array — treat as unset
             };
             return (val_str, "toml");
         }
@@ -273,7 +332,13 @@ fn config_get(key: &str) -> (String, &'static str) {
 // ── Instance Config ──────────────────────────────────────────────────────
 
 /// Handle instance-level config: `hcom config -i <name> [key] [value]`
-fn config_instance(db: &HcomDb, instance_arg: &str, args: &[String], ctx: Option<&CommandContext>, json_mode: bool) -> i32 {
+fn config_instance(
+    db: &HcomDb,
+    instance_arg: &str,
+    args: &[String],
+    ctx: Option<&CommandContext>,
+    json_mode: bool,
+) -> i32 {
     // Resolve "self" to current instance
     let name = if instance_arg == "self" {
         if let Some(id) = ctx.and_then(|c| c.identity.as_ref()) {
@@ -283,7 +348,8 @@ fn config_instance(db: &HcomDb, instance_arg: &str, args: &[String], ctx: Option
             return 1;
         }
     } else {
-        instance_arg.to_string()
+        instances::resolve_display_name(db, instance_arg)
+            .unwrap_or_else(|| instance_arg.to_string())
     };
 
     // Verify instance exists
@@ -296,15 +362,13 @@ fn config_instance(db: &HcomDb, instance_arg: &str, args: &[String], ctx: Option
                 rusqlite::params![format!("{name}%")],
                 |row| row.get::<_, String>(0),
             ) {
-                Ok(matched) => {
-                    match db.get_instance_full(&matched) {
-                        Ok(Some(inst)) => inst,
-                        _ => {
-                            eprintln!("Error: Agent '{name}' not found");
-                            return 1;
-                        }
+                Ok(matched) => match db.get_instance_full(&matched) {
+                    Ok(Some(inst)) => inst,
+                    _ => {
+                        eprintln!("Error: Agent '{name}' not found");
+                        return 1;
                     }
-                }
+                },
                 Err(_) => {
                     eprintln!("Error: Agent '{name}' not found");
                     return 1;
@@ -335,11 +399,23 @@ fn config_instance(db: &HcomDb, instance_arg: &str, args: &[String], ctx: Option
         } else {
             println!("Agent: {full_name}");
             println!("  tag: {}", instance.tag.as_deref().unwrap_or("(none)"));
-            println!("  timeout: {}s", instance.wait_timeout.map(|t| t.to_string()).unwrap_or_else(|| "(default)".into()));
+            println!(
+                "  timeout: {}s",
+                instance
+                    .wait_timeout
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "(default)".into())
+            );
             let hints = instance.hints.as_deref().unwrap_or("");
-            println!("  hints: {}", if hints.is_empty() { "(none)" } else { hints });
+            println!(
+                "  hints: {}",
+                if hints.is_empty() { "(none)" } else { hints }
+            );
             let sat = instance.subagent_timeout.map(|t| format!("{t}s"));
-            println!("  subagent_timeout: {}", sat.as_deref().unwrap_or("(default)"));
+            println!(
+                "  subagent_timeout: {}",
+                sat.as_deref().unwrap_or("(default)")
+            );
         }
         return 0;
     }
@@ -347,7 +423,13 @@ fn config_instance(db: &HcomDb, instance_arg: &str, args: &[String], ctx: Option
     let key = args[0].as_str();
     // Join all remaining args with spaces
     let value_joined = if args.len() > 1 {
-        Some(args[1..].iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "))
+        Some(
+            args[1..]
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
     } else {
         None
     };
@@ -356,7 +438,14 @@ fn config_instance(db: &HcomDb, instance_arg: &str, args: &[String], ctx: Option
     // Validate key
     if !INSTANCE_KEYS.iter().any(|(k, _)| *k == key) {
         eprintln!("Error: Unknown instance config key '{key}'");
-        eprintln!("Valid keys: {}", INSTANCE_KEYS.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(", "));
+        eprintln!(
+            "Valid keys: {}",
+            INSTANCE_KEYS
+                .iter()
+                .map(|(k, _)| *k)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         return 1;
     }
 
@@ -364,9 +453,21 @@ fn config_instance(db: &HcomDb, instance_arg: &str, args: &[String], ctx: Option
     let Some(value) = value else {
         match key {
             "tag" => println!("{}", instance.tag.as_deref().unwrap_or("")),
-            "timeout" => println!("{}", instance.wait_timeout.map(|t| t.to_string()).unwrap_or_default()),
+            "timeout" => println!(
+                "{}",
+                instance
+                    .wait_timeout
+                    .map(|t| t.to_string())
+                    .unwrap_or_default()
+            ),
             "hints" => println!("{}", instance.hints.as_deref().unwrap_or("")),
-            "subagent_timeout" => println!("{}", instance.subagent_timeout.map(|t| t.to_string()).unwrap_or_default()),
+            "subagent_timeout" => println!(
+                "{}",
+                instance
+                    .subagent_timeout
+                    .map(|t| t.to_string())
+                    .unwrap_or_default()
+            ),
             _ => {}
         }
         return 0;
@@ -377,7 +478,11 @@ fn config_instance(db: &HcomDb, instance_arg: &str, args: &[String], ctx: Option
         "tag" => {
             let tag = if value.is_empty() { "" } else { value };
             // Validate: alphanumeric, hyphens, underscores only
-            if !tag.is_empty() && !tag.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            if !tag.is_empty()
+                && !tag
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
                 eprintln!("Error: Tag must be alphanumeric (hyphens and underscores allowed)");
                 return 1;
             }
@@ -471,7 +576,10 @@ pub fn cmd_config(db: &HcomDb, args: &ConfigArgs, ctx: Option<&CommandContext>) 
     let setup_mode = args.setup;
     let instance_name = args.instance.clone();
     // Reconstruct argv from key + value for backward compat with existing handlers
-    let argv: Vec<String> = args.key.iter().cloned()
+    let argv: Vec<String> = args
+        .key
+        .iter()
+        .cloned()
         .chain(args.value.iter().cloned())
         .collect();
 
@@ -482,7 +590,9 @@ pub fn cmd_config(db: &HcomDb, args: &ConfigArgs, ctx: Option<&CommandContext>) 
             && positional[0] == "terminal"
             && positional[1].starts_with("kitty");
         if !is_kitty_terminal {
-            eprintln!("Error: --setup is only valid with kitty: hcom config terminal kitty --setup");
+            eprintln!(
+                "Error: --setup is only valid with kitty: hcom config terminal kitty --setup"
+            );
             return 1;
         }
     }
@@ -502,9 +612,7 @@ pub fn cmd_config(db: &HcomDb, args: &ConfigArgs, ctx: Option<&CommandContext>) 
         let editor = std::env::var("EDITOR")
             .or_else(|_| std::env::var("VISUAL"))
             .unwrap_or_else(|_| "vim".to_string());
-        let status = std::process::Command::new(&editor)
-            .arg(&path)
-            .status();
+        let status = std::process::Command::new(&editor).arg(&path).status();
         match status {
             Ok(s) if s.success() => return 0,
             Ok(s) => {
@@ -520,7 +628,7 @@ pub fn cmd_config(db: &HcomDb, args: &ConfigArgs, ctx: Option<&CommandContext>) 
 
     // Reset mode — delegate to reset.rs for proper timestamped archiving + env file
     if reset_mode {
-        return super::reset::reset_config();
+        return super::reset_ops::reset_config();
     }
 
     // No args: show all config
@@ -603,7 +711,10 @@ fn normalize_key(input: &str) -> String {
 /// Reads per-instance DB values
 /// (tag, wait_timeout, hints, subagent_timeout) and returns overrides
 /// where the instance value differs from the global config value.
-fn get_runtime_overrides(db: &HcomDb, ctx: Option<&CommandContext>) -> std::collections::HashMap<&'static str, String> {
+fn get_runtime_overrides(
+    db: &HcomDb,
+    ctx: Option<&CommandContext>,
+) -> std::collections::HashMap<&'static str, String> {
     use std::collections::HashMap;
 
     let mut overrides: HashMap<&'static str, String> = HashMap::new();
@@ -667,7 +778,10 @@ fn show_all_config(db: &HcomDb, ctx: Option<&CommandContext>, json_mode: bool) -
             };
             result.insert(key.to_string(), serde_json::Value::String(display));
         }
-        println!("{}", serde_json::to_string_pretty(&Value::Object(result)).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&Value::Object(result)).unwrap_or_default()
+        );
     } else {
         println!("hcom configuration ({})\n", config_path().display());
         println!("hcom Settings:");
@@ -689,7 +803,9 @@ fn show_all_config(db: &HcomDb, ctx: Option<&CommandContext>, json_mode: bool) -
             };
             println!("  {key:<28} {display:<30} [{source}]");
         }
-        println!("\n[env] = environment, [toml] = config.toml, [file] = env file, [runtime] = agent override, (blank) = default");
+        println!(
+            "\n[env] = environment, [toml] = config.toml, [file] = env file, [runtime] = agent override, (blank) = default"
+        );
         println!("\nEdit: hcom config --edit");
     }
     0
@@ -699,7 +815,8 @@ fn show_all_config(db: &HcomDb, ctx: Option<&CommandContext>, json_mode: bool) -
 /// Rich per-key help text.
 pub fn config_help(key: &str) -> Option<&'static str> {
     match key {
-        "HCOM_TAG" => Some("\
+        "HCOM_TAG" => Some(
+            "\
 HCOM_TAG - Group tag for launched instances
 
 Purpose:
@@ -721,9 +838,11 @@ Addressing:
   @dev         → sends to all agents with tag \"dev\"
   @dev-luna    → sends to specific agent
 
-Allowed characters: letters, numbers, hyphens (a-z, A-Z, 0-9, -)"),
+Allowed characters: letters, numbers, hyphens (a-z, A-Z, 0-9, -)",
+        ),
 
-        "HCOM_HINTS" => Some("\
+        "HCOM_HINTS" => Some(
+            "\
 HCOM_HINTS - Text injected with all messages
 
 Purpose:
@@ -740,9 +859,11 @@ Example:
 Notes:
   - Hints are appended to message content, not system prompt
   - Each agent can have different hints (set via hcom config -i <name> hints)
-  - Global hints apply to all new launches"),
+  - Global hints apply to all new launches",
+        ),
 
-        "HCOM_NOTES" => Some("\
+        "HCOM_NOTES" => Some(
+            "\
 HCOM_NOTES - One-time notes appended to bootstrap
 
   Custom text added to agent system context at startup.
@@ -753,9 +874,11 @@ Usage:
   hcom config notes \"\"                            # Clear
   HCOM_NOTES=\"tips\" hcom 1 claude                 # Per-launch override
 
-  Changing after launch has no effect (bootstrap already delivered)."),
+  Changing after launch has no effect (bootstrap already delivered).",
+        ),
 
-        "HCOM_TIMEOUT" => Some("\
+        "HCOM_TIMEOUT" => Some(
+            "\
 HCOM_TIMEOUT - Advanced: idle timeout for headless/vanilla Claude (seconds)
 
 Default: 86400 (24 hours)
@@ -775,9 +898,11 @@ How it works:
 
 Usage (if needed):
   hcom config HCOM_TIMEOUT 3600   # 1 hour
-  export HCOM_TIMEOUT=3600        # via environment"),
+  export HCOM_TIMEOUT=3600        # via environment",
+        ),
 
-        "HCOM_SUBAGENT_TIMEOUT" => Some("\
+        "HCOM_SUBAGENT_TIMEOUT" => Some(
+            "\
 HCOM_SUBAGENT_TIMEOUT - Timeout for Claude subagents (seconds)
 
 Default: 30
@@ -793,53 +918,67 @@ Usage:
 Notes:
   - Only applies to Claude Code's Task tool spawned agents
   - Parent agent blocks until subagent completes or times out
-  - Increase for complex subagent tasks"),
+  - Increase for complex subagent tasks",
+        ),
 
-        "HCOM_CLAUDE_ARGS" => Some("\
+        "HCOM_CLAUDE_ARGS" => Some(
+            "\
 HCOM_CLAUDE_ARGS - Default args passed to claude on launch
 
 Example: hcom config claude_args \"--model opus\"
 Clear:   hcom config claude_args \"\"
 
-Merged with launch-time cli args (launch args win on conflict)."),
+Merged with launch-time cli args (launch args win on conflict).",
+        ),
 
-        "HCOM_GEMINI_ARGS" => Some("\
+        "HCOM_GEMINI_ARGS" => Some(
+            "\
 HCOM_GEMINI_ARGS - Default args passed to gemini on launch
 
 Example: hcom config gemini_args \"--model gemini-2.5-flash\"
 Clear:   hcom config gemini_args \"\"
 
-Merged with launch-time cli args (launch args win on conflict)."),
+Merged with launch-time cli args (launch args win on conflict).",
+        ),
 
-        "HCOM_CODEX_ARGS" => Some("\
+        "HCOM_CODEX_ARGS" => Some(
+            "\
 HCOM_CODEX_ARGS - Default args passed to codex on launch
 
 Example: hcom config codex_args \"--search\"
 Clear:   hcom config codex_args \"\"
 
-Merged with launch-time cli args (launch args win on conflict)."),
+Merged with launch-time cli args (launch args win on conflict).",
+        ),
 
-        "HCOM_RELAY" => Some("\
+        "HCOM_RELAY" => Some(
+            "\
 HCOM_RELAY - MQTT broker URL
 
 Empty = use public brokers (broker.emqx.io, broker.hivemq.com, test.mosquitto.org).
 Set automatically by 'hcom relay new' (pins first working broker).
 
-Private broker: hcom relay new --broker mqtts://host:port"),
+Private broker: hcom relay new --broker mqtts://host:port",
+        ),
 
-        "HCOM_RELAY_ID" => Some("\
+        "HCOM_RELAY_ID" => Some(
+            "\
 HCOM_RELAY_ID - Shared UUID for relay group
 
 Generated by 'hcom relay new'. Other devices join with 'hcom relay connect <token>'.
-All devices with the same relay_id sync state via MQTT pub/sub."),
+All devices with the same relay_id sync state via MQTT pub/sub.",
+        ),
 
-        "HCOM_RELAY_TOKEN" => Some("\
+        "HCOM_RELAY_TOKEN" => Some(
+            "\
 HCOM_RELAY_TOKEN - Auth token for MQTT broker
 
 Optional. Set via 'hcom relay new --password <secret>' or directly here.
-Only needed if your broker requires authentication."),
+Only needed if your broker requires authentication.",
+        ),
 
-        "HCOM_AUTO_APPROVE" => Some("\
+        "HCOM_AUTO_APPROVE" => Some(
+            "\
 HCOM_AUTO_APPROVE - Auto-approve safe hcom commands
 
 Purpose:
@@ -859,9 +998,11 @@ Always require approval:
   - hcom stop           (stops instances)
   - hcom <N> claude     (launches new instances)
 
-Values: 1, true, yes, on (enabled) | 0, false, no, off, \"\" (disabled)"),
+Values: 1, true, yes, on (enabled) | 0, false, no, off, \"\" (disabled)",
+        ),
 
-        "HCOM_AUTO_SUBSCRIBE" => Some("\
+        "HCOM_AUTO_SUBSCRIBE" => Some(
+            "\
 HCOM_AUTO_SUBSCRIBE - Auto-subscribe event presets for new instances
 
 Default: collision
@@ -882,9 +1023,11 @@ Available presets:
 
 Notes:
   - Instances can add/remove subscriptions at runtime
-  - See 'hcom events --help' for subscription management"),
+  - See 'hcom events --help' for subscription management",
+        ),
 
-        "HCOM_NAME_EXPORT" => Some("\
+        "HCOM_NAME_EXPORT" => Some(
+            "\
 HCOM_NAME_EXPORT - Export instance name to custom env var
 
 Purpose:
@@ -909,17 +1052,21 @@ Example:
 Notes:
   - Only affects hcom-launched instances (hcom N claude/gemini/codex)
   - Variable name must be a valid shell identifier
-  - Works alongside HCOM_PROCESS_ID (always set) for identity"),
+  - Works alongside HCOM_PROCESS_ID (always set) for identity",
+        ),
 
-        "HCOM_OPENCODE_ARGS" => Some("\
+        "HCOM_OPENCODE_ARGS" => Some(
+            "\
 HCOM_OPENCODE_ARGS - Default args passed to opencode on launch
 
 Example: hcom config opencode_args \"--model o3\"
 Clear:   hcom config opencode_args \"\"
 
-Merged with launch-time cli args (launch args win on conflict)."),
+Merged with launch-time cli args (launch args win on conflict).",
+        ),
 
-        "HCOM_RELAY_ENABLED" => Some("\
+        "HCOM_RELAY_ENABLED" => Some(
+            "\
 HCOM_RELAY_ENABLED - Enable or disable relay sync
 
 Default: true (when relay is configured)
@@ -928,7 +1075,8 @@ Usage:
   hcom config relay_enabled false    Disable relay sync
   hcom config relay_enabled true     Re-enable relay sync
 
-Temporarily disables MQTT sync without removing relay configuration."),
+Temporarily disables MQTT sync without removing relay configuration.",
+        ),
 
         _ => None,
     }
@@ -936,7 +1084,7 @@ Temporarily disables MQTT sync without removing relay configuration."),
 
 /// Build terminal help text (shared between config --info and run docs --config).
 pub fn terminal_help_text(show_current: bool) -> String {
-    use crate::shared::constants::TERMINAL_PRESETS;
+    use crate::shared::terminal_presets::TERMINAL_PRESETS;
 
     let platform = match std::env::consts::OS {
         "macos" => "Darwin",
@@ -950,10 +1098,14 @@ pub fn terminal_help_text(show_current: bool) -> String {
         ("kitty", "auto split/tab/window"),
         ("wezterm", "auto tab/split/window"),
         ("tmux", "detached sessions"),
+        ("cmux", "workspaces"),
     ];
     const MANAGED_VARIANTS: &[(&str, &[&str])] = &[
         ("kitty", &["kitty-window", "kitty-tab", "kitty-split"]),
-        ("wezterm", &["wezterm-window", "wezterm-tab", "wezterm-split"]),
+        (
+            "wezterm",
+            &["wezterm-window", "wezterm-tab", "wezterm-split"],
+        ),
         ("tmux", &["tmux-split"]),
     ];
 
@@ -972,9 +1124,7 @@ pub fn terminal_help_text(show_current: bool) -> String {
 
     // Check binary availability
     let is_available = |preset_name: &str| -> bool {
-        let preset = TERMINAL_PRESETS
-            .iter()
-            .find(|(n, _)| *n == preset_name);
+        let preset = TERMINAL_PRESETS.iter().find(|(n, _)| *n == preset_name);
         if let Some((name, p)) = preset {
             if let Some(bin) = p.binary {
                 if crate::terminal::which_bin(bin).is_some() {
@@ -990,8 +1140,12 @@ pub fn terminal_help_text(show_current: bool) -> String {
                 } else {
                     format!("{app}.app")
                 };
-                for dir in ["/Applications", "/Applications/Utilities",
-                            "/System/Applications", "/System/Applications/Utilities"] {
+                for dir in [
+                    "/Applications",
+                    "/Applications/Utilities",
+                    "/System/Applications",
+                    "/System/Applications/Utilities",
+                ] {
                     let path = format!("{dir}/{bundle}");
                     if std::path::Path::new(&path).exists() {
                         return true;
@@ -1011,11 +1165,12 @@ pub fn terminal_help_text(show_current: bool) -> String {
         if current.is_empty() {
             lines.push("Current: default (auto-detect)".to_string());
         } else {
-            let kind = if TERMINAL_PRESETS.iter().any(|(n, p)| *n == current && p.close.is_some()) {
-                "managed"
-            } else {
-                "open only"
-            };
+            let kind =
+                if crate::config::get_merged_preset(&current).is_some_and(|p| p.close.is_some()) {
+                    "managed"
+                } else {
+                    "open only"
+                };
             lines.push(format!("Current: {current} ({kind}) [{source}]"));
         }
         lines.push(String::new());
@@ -1062,6 +1217,46 @@ pub fn terminal_help_text(show_current: bool) -> String {
         lines.push(format!("  {mark} {name}"));
     }
 
+    // TOML-defined presets not in built-ins
+    let toml_path = crate::paths::config_toml_path();
+    let toml_presets: Vec<(String, bool)> = crate::config::load_toml_presets(&toml_path)
+        .and_then(|p| {
+            p.as_table().map(|t| {
+                t.iter()
+                    .filter(|(name, _)| !TERMINAL_PRESETS.iter().any(|(n, _)| *n == name.as_str()))
+                    .map(|(name, val)| {
+                        let has_close = val
+                            .get("close")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| !s.is_empty());
+                        (name.clone(), has_close)
+                    })
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    if !toml_presets.is_empty() {
+        lines.push(String::new());
+        lines.push("Custom presets (config.toml):".to_string());
+        for (name, has_close) in &toml_presets {
+            let kind = if *has_close {
+                "open + close"
+            } else {
+                "open only"
+            };
+            let mark = if crate::config::get_merged_preset(name)
+                .and_then(|p| p.binary)
+                .map(|b| crate::terminal::which_bin(&b).is_some())
+                .unwrap_or(true)
+            {
+                "[+]"
+            } else {
+                "[-]"
+            };
+            lines.push(format!("  {mark} {:<14} ({kind})", name));
+        }
+    }
+
     lines.push(String::new());
     lines.push("Custom command (open only):".to_string());
     lines.push("  hcom config terminal \"my-terminal -e bash {script}\"".to_string());
@@ -1069,11 +1264,16 @@ pub fn terminal_help_text(show_current: bool) -> String {
     lines.push("Custom preset with close (~/.hcom/config.toml):".to_string());
     lines.push("  [terminal.presets.myterm]".to_string());
     lines.push("  open = \"myterm spawn -- bash {script}\"".to_string());
-    lines.push("  close = \"myterm kill --id {id}\"".to_string());
+    lines.push("  close = \"myterm kill --id {pane_id}\"".to_string());
     lines.push("  binary = \"myterm\"".to_string());
+    lines.push("  pane_id_env = \"MYTERM_PANE_ID\"".to_string());
     lines.push(String::new());
-    lines.push("  {id} = stdout from the open command.".to_string());
-    lines.push("  {pid} and {process_id} also available.".to_string());
+    lines.push("Placeholders:".to_string());
+    lines.push("  {script}     = hcom-generated launch wrapper script path".to_string());
+    lines.push("  {pane_id}    = pane/window/workspace ID from pane_id_env; falls back to {id}".to_string());
+    lines.push("  {process_id} = HCOM_PROCESS_ID for the launched agent".to_string());
+    lines.push("  {pid}        = launched terminal process ID".to_string());
+    lines.push("  {id}         = first line of stdout captured from the open command".to_string());
     lines.push(String::new());
     lines.push("Set:    hcom config terminal kitty".to_string());
     lines.push("Reset:  hcom config terminal default".to_string());
@@ -1134,7 +1334,7 @@ fn show_key_info(key: &str) -> i32 {
 
 /// Handle terminal preset configuration.
 fn config_terminal(argv: &[String], setup_mode: bool) -> i32 {
-    use crate::shared::constants::TERMINAL_PRESETS;
+    use crate::shared::terminal_presets::TERMINAL_PRESETS;
 
     if argv.is_empty() {
         // Show terminal status
@@ -1148,6 +1348,18 @@ fn config_terminal(argv: &[String], setup_mode: bool) -> i32 {
         for (name, _preset) in TERMINAL_PRESETS.iter() {
             let marker = if *name == current { " ← current" } else { "" };
             println!("  {}{}", name, marker);
+        }
+        // Include TOML-defined presets not in built-ins
+        let toml_path = crate::paths::config_toml_path();
+        if let Some(toml_presets) = crate::config::load_toml_presets(&toml_path) {
+            if let Some(table) = toml_presets.as_table() {
+                for name in table.keys() {
+                    if !TERMINAL_PRESETS.iter().any(|(n, _)| *n == name.as_str()) {
+                        let marker = if *name == current { " ← current" } else { "" };
+                        println!("  {}{}", name, marker);
+                    }
+                }
+            }
         }
         println!("\nSet: hcom config terminal <preset>");
         return 0;
@@ -1173,21 +1385,23 @@ fn config_terminal(argv: &[String], setup_mode: bool) -> i32 {
         }
     }
 
-    // Validate preset exists
+    // Validate preset exists (built-in or user-defined in config.toml)
     let valid = TERMINAL_PRESETS
         .iter()
-        .any(|(name, _)| *name == preset_name.as_str());
+        .any(|(name, _)| *name == preset_name.as_str())
+        || crate::config::is_user_defined_preset(&preset_name);
 
     if !valid {
+        let mut available: Vec<&str> = TERMINAL_PRESETS.iter().map(|(name, _)| *name).collect();
+        // Include user-defined presets
+        let toml_path = crate::paths::config_toml_path();
+        let user_names: Vec<String> = crate::config::load_toml_presets(&toml_path)
+            .and_then(|p| p.as_table().map(|t| t.keys().cloned().collect()))
+            .unwrap_or_default();
         eprintln!("Error: Unknown terminal preset '{preset_name}'");
-        eprintln!(
-            "Available: {}",
-            TERMINAL_PRESETS
-                .iter()
-                .map(|(name, _)| *name)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let user_refs: Vec<&str> = user_names.iter().map(|s| s.as_str()).collect();
+        available.extend(user_refs);
+        eprintln!("Available: {}", available.join(", "));
         return 1;
     }
 
@@ -1215,7 +1429,10 @@ fn config_terminal(argv: &[String], setup_mode: bool) -> i32 {
 fn show_kitty_status(preset_name: &str) {
     if let Some(socket) = find_kitty_socket() {
         if preset_name == "kitty" {
-            println!("  Socket found ({}) — splits/tabs available", socket.display());
+            println!(
+                "  Socket found ({}) — splits/tabs available",
+                socket.display()
+            );
         }
         return;
     }
@@ -1261,10 +1478,7 @@ fn find_kitty_conf() -> Option<PathBuf> {
 
 /// Find kitty remote control socket.
 fn find_kitty_socket() -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from("/tmp/kitty"),
-        PathBuf::from("/tmp/mykitty"),
-    ];
+    let candidates = [PathBuf::from("/tmp/kitty"), PathBuf::from("/tmp/mykitty")];
     candidates.into_iter().find(|p| p.exists())
 }
 
@@ -1273,7 +1487,9 @@ fn kitty_conf_has(path: &Path, key: &str) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     for line in content.lines() {
         let line = line.trim();
-        if line.starts_with('#') { continue; }
+        if line.starts_with('#') {
+            continue;
+        }
         let mut parts = line.splitn(2, |c: char| c.is_whitespace());
         if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
             if k == key {
@@ -1287,7 +1503,10 @@ fn kitty_conf_has(path: &Path, key: &str) -> Option<String> {
 /// Configure kitty for remote control (splits/tabs).
 fn kitty_setup() -> i32 {
     if let Some(socket) = find_kitty_socket() {
-        println!("Kitty remote control already working ({})", socket.display());
+        println!(
+            "Kitty remote control already working ({})",
+            socket.display()
+        );
         return 0;
     }
 
@@ -1303,13 +1522,19 @@ fn kitty_setup() -> i32 {
     let has_listen = kitty_conf_has(&conf, "listen_on");
 
     if matches!(has_rc.as_deref(), Some("yes" | "socket")) && has_listen.is_some() {
-        println!("Config OK ({}) but no socket — restart kitty", conf.display());
+        println!(
+            "Config OK ({}) but no socket — restart kitty",
+            conf.display()
+        );
         return 0;
     }
 
     if let Some(ref rc_val) = has_rc {
         if rc_val != "yes" && rc_val != "socket" {
-            eprintln!("Error: allow_remote_control is '{rc_val}' in {}", conf.display());
+            eprintln!(
+                "Error: allow_remote_control is '{rc_val}' in {}",
+                conf.display()
+            );
             eprintln!("  Change to 'yes' or 'socket', then restart kitty");
             return 1;
         }
@@ -1350,12 +1575,16 @@ fn kitty_setup() -> i32 {
 fn update_auto_approve_permissions(value: &str) {
     let enabled = !matches!(value, "0" | "false" | "False" | "no" | "off" | "");
     // Re-run hooks setup to update tool permission files
-    let _ = std::process::Command::new("hcom")
-        .args(["hooks", "setup"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .and_then(|mut c| c.wait());
+    let prefix = crate::runtime_env::get_hcom_prefix();
+    if let Some((cmd, prefix_args)) = prefix.split_first() {
+        let _ = std::process::Command::new(cmd)
+            .args(prefix_args)
+            .args(["hooks", "setup"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .and_then(|mut c| c.wait());
+    }
 
     if enabled {
         println!("Auto-approve enabled for safe hcom commands in Claude/Gemini/Codex");
@@ -1367,11 +1596,15 @@ fn update_auto_approve_permissions(value: &str) {
 /// Trigger relay push (best-effort, silent failure). C4 fix.
 fn trigger_relay_push() {
     // Trigger relay push (best-effort)
-    let _ = std::process::Command::new("hcom")
-        .args(["relay", "push"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let prefix = crate::runtime_env::get_hcom_prefix();
+    if let Some((cmd, prefix_args)) = prefix.split_first() {
+        let _ = std::process::Command::new(cmd)
+            .args(prefix_args)
+            .args(["relay", "push"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -1459,5 +1692,23 @@ mod tests {
             assert!(!desc.is_empty());
             assert!(!typ.is_empty());
         }
+    }
+
+    #[test]
+    fn test_terminal_help_text_lists_cmux_as_managed() {
+        crate::config::Config::reset();
+        crate::config::Config::init();
+        let help = terminal_help_text(false);
+        let managed = help
+            .split("Other (opens window only):")
+            .next()
+            .expect("managed section should exist");
+        let other = help
+            .split("Other (opens window only):")
+            .nth(1)
+            .expect("other section should exist");
+
+        assert!(managed.contains("cmux"));
+        assert!(!other.contains("cmux"));
     }
 }

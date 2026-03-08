@@ -9,16 +9,10 @@
 use crate::db::HcomDb;
 use crate::identity;
 use crate::instances;
-use crate::shared::{
-    CommandContext, SenderKind,
-    ST_ACTIVE, ST_INACTIVE,
-    status_icon, status_fg,
-};
 #[cfg(test)]
 use crate::shared::SenderIdentity;
-use crate::shared::constants::{RESET, DIM, BOLD, FG_CYAN};
-
-// ==================== 2-pre.1: CommandContext Builder ====================
+use crate::shared::ansi::{BOLD, DIM, FG_CYAN, RESET};
+use crate::shared::{CommandContext, ST_ACTIVE, ST_INACTIVE, SenderKind, status_fg, status_icon};
 
 /// Commands that should NOT trigger hookless status update.
 /// Handled internally or are lifecycle commands.
@@ -45,8 +39,16 @@ pub fn build_ctx_for_command(
         if cmd != Some("start") {
             // Explicit --name: propagate errors
             Some(
-                identity::resolve_identity(db, Some(name), None, None, process_id, codex_thread_id, None)
-                    .map_err(|e| e.to_string())?,
+                identity::resolve_identity(
+                    db,
+                    Some(name),
+                    None,
+                    None,
+                    process_id,
+                    codex_thread_id,
+                    None,
+                )
+                .map_err(|e| e.to_string())?,
             )
         } else {
             None
@@ -62,8 +64,6 @@ pub fn build_ctx_for_command(
         go,
     })
 }
-
-// ==================== 2-pre.2: Identity Gating ====================
 
 /// Check identity gating for a CLI command.
 ///
@@ -95,7 +95,7 @@ pub fn check_identity_gate(
         .is_some_and(|id| matches!(id.kind, SenderKind::Instance) && id.instance_data.is_some());
 
     if !is_participant {
-        let hcom_cmd = crate::hooks::common::build_hcom_command();
+        let hcom_cmd = crate::runtime_env::build_hcom_command();
         let mut msg = format!(
             "hcom identity not found, you need to run '{hcom_cmd} start' first, then use '{hcom_cmd} {cmd}'"
         );
@@ -111,8 +111,6 @@ pub fn check_identity_gate(
 
     Ok(())
 }
-
-// ==================== 2-pre.3: Hookless Command Status ====================
 
 /// Set status for instances without PreToolUse hooks before command runs.
 ///
@@ -163,11 +161,13 @@ pub fn set_hookless_command_status(db: &HcomDb, cmd_name: &str, ctx: &CommandCon
     }
 
     let context = format!("tool:{cmd_name}");
-    let status = if tool == "adhoc" { ST_INACTIVE } else { ST_ACTIVE };
-    instances::set_status(db, &identity.name, status, &context, "", "", None, None);
+    let status = if tool == "adhoc" {
+        ST_INACTIVE
+    } else {
+        ST_ACTIVE
+    };
+    instances::set_status(db, &identity.name, status, &context, Default::default());
 }
-
-// ==================== 2-pre.4: Pending Message Delivery ====================
 
 /// For hookless instances (codex/adhoc): append unread messages after command output.
 ///
@@ -231,13 +231,24 @@ pub fn maybe_deliver_pending_messages(
     let sender_display = instances::get_display_name(db, &messages[0].from);
     let context = format!("deliver:{sender_display}");
 
-    let status = if tool == "codex" { ST_ACTIVE } else { ST_INACTIVE };
-    instances::set_status(db, &identity.name, status, &context, "", msg_ts, None, None);
+    let status = if tool == "codex" {
+        ST_ACTIVE
+    } else {
+        ST_INACTIVE
+    };
+    instances::set_status(
+        db,
+        &identity.name,
+        status,
+        &context,
+        instances::StatusUpdate {
+            msg_ts,
+            ..Default::default()
+        },
+    );
 
     Some(output)
 }
-
-// ==================== 2-pre.5: Human Message Formatting ====================
 
 /// Format messages for human terminal display.
 ///
@@ -264,10 +275,7 @@ pub fn format_messages_human(
             .get("from")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        let text = msg
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let text = msg.get("message").and_then(|v| v.as_str()).unwrap_or("");
         let intent = msg.get("intent").and_then(|v| v.as_str());
         let thread = msg.get("thread").and_then(|v| v.as_str());
         let event_id = msg.get("event_id").and_then(|v| v.as_i64());
@@ -382,10 +390,7 @@ fn format_hook_messages_simple(
             .get("from")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        let text = msg
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let text = msg.get("message").and_then(|v| v.as_str()).unwrap_or("");
         let intent = msg.get("intent").and_then(|v| v.as_str());
         let thread = msg.get("thread").and_then(|v| v.as_str());
         let event_id = msg.get("event_id").and_then(|v| v.as_i64());
@@ -414,10 +419,7 @@ fn format_hook_messages_simple(
                     .get("from")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let text = msg
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let text = msg.get("message").and_then(|v| v.as_str()).unwrap_or("");
                 let intent = msg.get("intent").and_then(|v| v.as_str());
                 let thread = msg.get("thread").and_then(|v| v.as_str());
                 let event_id = msg.get("event_id").and_then(|v| v.as_i64());
@@ -512,8 +514,6 @@ fn format_hook_messages_simple_from_msgs(
     }
 }
 
-// ==================== Tests ====================
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,7 +562,8 @@ mod tests {
     fn test_build_ctx_with_name() {
         let (db, _dir) = make_test_db();
         insert_instance(&db, "luna", "claude");
-        let ctx = build_ctx_for_command(&db, Some("send"), Some("luna"), false, None, None).unwrap();
+        let ctx =
+            build_ctx_for_command(&db, Some("send"), Some("luna"), false, None, None).unwrap();
         assert!(ctx.identity.is_some());
         assert_eq!(ctx.identity.as_ref().unwrap().name, "luna");
         assert_eq!(ctx.explicit_name.as_deref(), Some("luna"));
@@ -572,7 +573,8 @@ mod tests {
     fn test_build_ctx_start_skips_name_resolution() {
         let (db, _dir) = make_test_db();
         insert_instance(&db, "luna", "claude");
-        let ctx = build_ctx_for_command(&db, Some("start"), Some("luna"), false, None, None).unwrap();
+        let ctx =
+            build_ctx_for_command(&db, Some("start"), Some("luna"), false, None, None).unwrap();
         // start skips name resolution
         assert!(ctx.identity.is_none());
         assert_eq!(ctx.explicit_name.as_deref(), Some("luna"));
@@ -583,7 +585,8 @@ mod tests {
         let (db, _dir) = make_test_db();
         insert_instance(&db, "luna", "claude");
         insert_process_binding(&db, "pid-1", "luna");
-        let ctx = build_ctx_for_command(&db, Some("send"), None, false, Some("pid-1"), None).unwrap();
+        let ctx =
+            build_ctx_for_command(&db, Some("send"), None, false, Some("pid-1"), None).unwrap();
         assert!(ctx.identity.is_some());
         assert_eq!(ctx.identity.as_ref().unwrap().name, "luna");
     }
@@ -794,7 +797,12 @@ mod tests {
 
     #[test]
     fn test_prefix_intent_and_thread() {
-        let prefix = build_message_prefix(Some("request"), Some("pr-42"), Some(42), &serde_json::json!({}));
+        let prefix = build_message_prefix(
+            Some("request"),
+            Some("pr-42"),
+            Some(42),
+            &serde_json::json!({}),
+        );
         assert_eq!(prefix, "[request:pr-42 #42]");
     }
 

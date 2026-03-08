@@ -1,43 +1,13 @@
 //! Per-request execution context for hcom.
 //!
-//! - `thread_context.py` (291 LOC): thread-local accessors with os.environ fallback
-//! - `hcom_context.py` (226 LOC): frozen dataclass capturing env snapshot
-//! - `context.py` (151 LOC): launch context capture (git branch, tty, env vars)
-//!
-//! In Rust there is no daemon mode with thread-locals — HcomContext is constructed
-//! once at request entry and passed by reference to all handlers. No global state.
+//! HcomContext is constructed once at request entry and passed by reference
+//! to all handlers. No global state or thread-locals.
 
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 
-/// Tool type for the current execution context.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolType {
-    Claude,
-    Gemini,
-    Codex,
-    OpenCode,
-    Adhoc,
-}
-
-impl ToolType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ToolType::Claude => "claude",
-            ToolType::Gemini => "gemini",
-            ToolType::Codex => "codex",
-            ToolType::OpenCode => "opencode",
-            ToolType::Adhoc => "adhoc",
-        }
-    }
-}
-
-impl std::fmt::Display for ToolType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+use crate::tool::Tool;
 
 /// Per-request execution context.
 ///
@@ -70,7 +40,7 @@ pub struct HcomContext {
 
     // === Tool detection ===
     /// Detected tool type.
-    pub tool: ToolType,
+    pub tool: Tool,
     /// CLAUDE_ENV_FILE path (for session ID extraction).
     pub claude_env_file: Option<String>,
     /// Tool markers for context-based detection.
@@ -130,34 +100,19 @@ impl HcomContext {
 
         // Determine tool type
         let tool = if is_claude {
-            ToolType::Claude
+            Tool::Claude
         } else if is_gemini {
-            ToolType::Gemini
+            Tool::Gemini
         } else if is_codex {
-            ToolType::Codex
+            Tool::Codex
         } else if is_opencode {
-            ToolType::OpenCode
+            Tool::OpenCode
         } else {
-            ToolType::Adhoc
+            Tool::Adhoc
         };
 
-        // Resolve hcom_dir
-        let home = env.get("HOME").or_else(|| env.get("USERPROFILE"));
-        let hcom_dir_str = get_nonempty("HCOM_DIR");
-        let hcom_dir = if let Some(ref dir) = hcom_dir_str {
-            if dir.starts_with('~') {
-                if let Some(h) = home {
-                    PathBuf::from(dir.replacen('~', h, 1))
-                } else {
-                    PathBuf::from(dir)
-                }
-            } else {
-                PathBuf::from(dir)
-            }
-        } else {
-            home.map(|h| PathBuf::from(h).join(".hcom"))
-                .unwrap_or_else(|| PathBuf::from(".hcom"))
-        };
+        // Resolve hcom_dir using the same normalization as Config/paths.
+        let (hcom_dir, hcom_dir_override) = crate::paths::resolve_hcom_dir_from_env(env, &cwd);
 
         Self {
             process_id: get_nonempty("HCOM_PROCESS_ID"),
@@ -166,7 +121,7 @@ impl HcomContext {
             is_background: get_nonempty("HCOM_BACKGROUND").is_some(),
             background_name: get_nonempty("HCOM_BACKGROUND"),
             hcom_dir,
-            hcom_dir_override: hcom_dir_str.is_some(),
+            hcom_dir_override,
             cwd,
             tool,
             claude_env_file: get_nonempty("CLAUDE_ENV_FILE"),
@@ -240,7 +195,7 @@ impl HcomContext {
             return None;
         }
         match self.tool {
-            ToolType::Adhoc => None,
+            Tool::Adhoc => None,
             _ => Some(self.tool.as_str()),
         }
     }
@@ -265,7 +220,7 @@ mod tests {
         assert!(ctx.is_claude);
         assert!(!ctx.is_gemini);
         assert!(!ctx.is_codex);
-        assert_eq!(ctx.tool, ToolType::Claude);
+        assert_eq!(ctx.tool, Tool::Claude);
         assert_eq!(ctx.cwd, PathBuf::from("/tmp"));
     }
 
@@ -275,7 +230,7 @@ mod tests {
         let ctx = HcomContext::from_env(&env, PathBuf::from("/tmp"));
 
         assert!(ctx.is_gemini);
-        assert_eq!(ctx.tool, ToolType::Gemini);
+        assert_eq!(ctx.tool, Tool::Gemini);
     }
 
     #[test]
@@ -284,15 +239,12 @@ mod tests {
         let ctx = HcomContext::from_env(&env, PathBuf::from("/tmp"));
 
         assert!(ctx.is_codex);
-        assert_eq!(ctx.tool, ToolType::Codex);
+        assert_eq!(ctx.tool, Tool::Codex);
     }
 
     #[test]
     fn test_from_env_codex_thread_id() {
-        let env = make_env(&[
-            ("CODEX_THREAD_ID", "thread-abc"),
-            ("HOME", "/home/test"),
-        ]);
+        let env = make_env(&[("CODEX_THREAD_ID", "thread-abc"), ("HOME", "/home/test")]);
         let ctx = HcomContext::from_env(&env, PathBuf::from("/tmp"));
 
         assert!(ctx.is_codex);
@@ -305,7 +257,7 @@ mod tests {
         let ctx = HcomContext::from_env(&env, PathBuf::from("/tmp"));
 
         assert!(ctx.is_opencode);
-        assert_eq!(ctx.tool, ToolType::OpenCode);
+        assert_eq!(ctx.tool, Tool::OpenCode);
     }
 
     #[test]
@@ -317,7 +269,7 @@ mod tests {
         assert!(!ctx.is_gemini);
         assert!(!ctx.is_codex);
         assert!(!ctx.is_opencode);
-        assert_eq!(ctx.tool, ToolType::Adhoc);
+        assert_eq!(ctx.tool, Tool::Adhoc);
     }
 
     #[test]
@@ -329,7 +281,7 @@ mod tests {
         let ctx = HcomContext::from_env(&env, PathBuf::from("/tmp"));
 
         assert!(ctx.is_claude);
-        assert_eq!(ctx.tool, ToolType::Claude);
+        assert_eq!(ctx.tool, Tool::Claude);
         assert_eq!(ctx.claude_env_file.as_deref(), Some("/tmp/.claude_env"));
     }
 
@@ -357,6 +309,14 @@ mod tests {
         let ctx = HcomContext::from_env(&env, PathBuf::from("/tmp"));
 
         assert_eq!(ctx.hcom_dir, PathBuf::from("/home/test/custom/.hcom"));
+    }
+
+    #[test]
+    fn test_hcom_dir_relative_resolved_to_absolute() {
+        let env = make_env(&[("HCOM_DIR", "relative/.hcom"), ("HOME", "/home/test")]);
+        let ctx = HcomContext::from_env(&env, PathBuf::from("/tmp/worktree"));
+
+        assert_eq!(ctx.hcom_dir, PathBuf::from("/tmp/worktree/relative/.hcom"));
     }
 
     #[test]
@@ -411,10 +371,7 @@ mod tests {
         let ctx = HcomContext::from_env(&env, PathBuf::from("/tmp"));
 
         assert_eq!(ctx.db_path(), PathBuf::from("/home/test/.hcom/hcom.db"));
-        assert_eq!(
-            ctx.log_dir(),
-            PathBuf::from("/home/test/.hcom/.tmp/logs")
-        );
+        assert_eq!(ctx.log_dir(), PathBuf::from("/home/test/.hcom/.tmp/logs"));
         assert_eq!(
             ctx.log_path(),
             PathBuf::from("/home/test/.hcom/.tmp/logs/hcom.log")
@@ -423,10 +380,8 @@ mod tests {
 
     #[test]
     fn test_is_inside_ai_tool() {
-        let adhoc = HcomContext::from_env(
-            &make_env(&[("HOME", "/home/test")]),
-            PathBuf::from("/tmp"),
-        );
+        let adhoc =
+            HcomContext::from_env(&make_env(&[("HOME", "/home/test")]), PathBuf::from("/tmp"));
         assert!(!adhoc.is_inside_ai_tool());
 
         let claude = HcomContext::from_env(
@@ -463,20 +418,18 @@ mod tests {
         assert_eq!(ctx.detect_vanilla_tool(), None);
 
         // Adhoc = not vanilla
-        let ctx = HcomContext::from_env(
-            &make_env(&[("HOME", "/home/test")]),
-            PathBuf::from("/tmp"),
-        );
+        let ctx =
+            HcomContext::from_env(&make_env(&[("HOME", "/home/test")]), PathBuf::from("/tmp"));
         assert_eq!(ctx.detect_vanilla_tool(), None);
     }
 
     #[test]
     fn test_tool_type_display() {
-        assert_eq!(ToolType::Claude.as_str(), "claude");
-        assert_eq!(ToolType::Gemini.as_str(), "gemini");
-        assert_eq!(ToolType::Codex.as_str(), "codex");
-        assert_eq!(ToolType::OpenCode.as_str(), "opencode");
-        assert_eq!(ToolType::Adhoc.as_str(), "adhoc");
+        assert_eq!(Tool::Claude.as_str(), "claude");
+        assert_eq!(Tool::Gemini.as_str(), "gemini");
+        assert_eq!(Tool::Codex.as_str(), "codex");
+        assert_eq!(Tool::OpenCode.as_str(), "opencode");
+        assert_eq!(Tool::Adhoc.as_str(), "adhoc");
     }
 
     #[test]
@@ -488,7 +441,7 @@ mod tests {
             ("HOME", "/home/test"),
         ]);
         let ctx = HcomContext::from_env(&env, PathBuf::from("/tmp"));
-        assert_eq!(ctx.tool, ToolType::Claude);
+        assert_eq!(ctx.tool, Tool::Claude);
     }
 
     #[test]
