@@ -1901,7 +1901,7 @@ impl HcomDb {
             let sql = sub.get("sql").and_then(|v| v.as_str()).unwrap_or("");
             if !sql.is_empty() {
                 let filter_query = format!("SELECT 1 FROM events_v WHERE id = ? AND ({})", sql);
-                // Get stored params if any
+                // Request-watch subs store parameterized SQL with a "params" array
                 let stored_params: Vec<String> = sub
                     .get("params")
                     .and_then(|v| v.as_array())
@@ -1917,7 +1917,6 @@ impl HcomDb {
                         .query_row(&filter_query, params![event_id], |_| Ok(()))
                         .is_ok()
                 } else {
-                    // Build dynamic params: [event_id, param1, param2, ...]
                     let mut all_params: Vec<Box<dyn rusqlite::types::ToSql>> =
                         vec![Box::new(event_id)];
                     for p in &stored_params {

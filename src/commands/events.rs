@@ -318,9 +318,18 @@ pub(crate) fn create_filter_subscription(
         }
     };
 
-    // Combine with manual SQL if provided
+    // Validate and combine user-provided SQL parts
     if !sql_parts.is_empty() {
         let manual_sql = sql_parts.join(" ").replace("\\!", "!");
+        if let Err(e) = db
+            .conn()
+            .execute(&format!("SELECT 1 FROM events_v WHERE ({manual_sql}) LIMIT 0"), [])
+        {
+            if !silent {
+                eprintln!("Error: Invalid SQL: {e}");
+            }
+            return 1;
+        }
         sql = format!("({sql}) AND ({manual_sql})");
     }
 
@@ -335,10 +344,11 @@ pub(crate) fn create_filter_subscription(
 
     // Generate subscription ID from SHA256 hash
     let id_source = format!(
-        "{}:{}:{}",
+        "{}:{}:{}:{}",
         caller,
         serde_json::to_string(filters).unwrap_or_default(),
-        sql
+        sql,
+        once
     );
     let hash = sha256_hash(&id_source);
     let sub_id = format!("sub-{}", &hash[..8]);
@@ -401,13 +411,18 @@ fn events_sub_sql(db: &HcomDb, sql_parts: &[String], caller: &str, once: bool) -
         return 1;
     }
 
-    let now = crate::shared::time::now_epoch_f64();
-
-    // Generate ID
-    let hash = sha256_hash(&format!("{caller}{sql}{now}"));
-    let sub_id = format!("sub-{}", &hash[..4]);
+    // Generate ID (deterministic — deduplicates same SQL+caller+once mode)
+    let hash = sha256_hash(&format!("{caller}{sql}{once}"));
+    let sub_id = format!("sub-{}", &hash[..8]);
     let sub_key = format!("events_sub:{sub_id}");
 
+    // Check duplicate
+    if db.kv_get(&sub_key).ok().flatten().is_some() {
+        println!("Subscription {sub_id} already exists");
+        return 0;
+    }
+
+    let now = crate::shared::time::now_epoch_f64();
     let last_id = db.get_last_event_id();
 
     let sub_data = json!({
