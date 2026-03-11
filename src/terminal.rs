@@ -14,7 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::paths;
 use crate::shared::constants::{HCOM_IDENTITY_VARS, TOOL_MARKER_VARS};
@@ -732,6 +732,49 @@ fn get_linux_terminal_argv() -> Option<Vec<String>> {
 /// Spawn terminal process, detached when inside AI tools.
 ///
 /// Returns (success, stdout_first_line) — stdout captured for {id} in close commands.
+fn is_external_terminal_launcher(argv: &[String]) -> bool {
+    let Some(cmd) = argv.first().map(|s| s.as_str()) else {
+        return false;
+    };
+
+    matches!(
+        cmd,
+        "open"
+            | "tmux"
+            | "kitty"
+            | "kitten"
+            | "wezterm"
+            | "alacritty"
+            | "cmux"
+            | "ttab"
+            | "wttab"
+            | "gnome-terminal"
+            | "konsole"
+            | "xterm"
+            | "tilix"
+            | "terminator"
+            | "zellij"
+            | "wsh"
+            | "wt"
+            | "wt.exe"
+            | "mintty"
+    )
+}
+
+fn maybe_append_ai_tool_launch_hint(
+    message: String,
+    argv: &[String],
+    inside_ai_tool: bool,
+) -> String {
+    if !inside_ai_tool || !is_external_terminal_launcher(argv) {
+        return message;
+    }
+
+    format!(
+        "{message}\nHint: This launch was attempted from inside a managed AI tool session, where terminal or session creation may be restricted. Rerun it with approval/escalation."
+    )
+}
+
 fn spawn_terminal_process(argv: &[String], inside_ai_tool: bool) -> Result<(bool, String)> {
     let launcher_env = get_launcher_env();
     let env_vec: Vec<(String, String)> = launcher_env.into_iter().collect();
@@ -749,7 +792,13 @@ fn spawn_terminal_process(argv: &[String], inside_ai_tool: bool) -> Result<(bool
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .context("Failed to spawn terminal process")?;
+            .map_err(|err| {
+                anyhow!(maybe_append_ai_tool_launch_hint(
+                    format!("Failed to spawn terminal process: {err}"),
+                    argv,
+                    inside_ai_tool,
+                ))
+            })?;
 
         let output = child
             .wait_with_output()
@@ -772,7 +821,11 @@ fn spawn_terminal_process(argv: &[String], inside_ai_tool: bool) -> Result<(bool
             } else {
                 format!("{}: {}", msg, stderr)
             };
-            bail!(full_msg);
+            bail!(maybe_append_ai_tool_launch_hint(
+                full_msg,
+                argv,
+                inside_ai_tool
+            ));
         }
 
         Ok((true, captured))
@@ -1433,6 +1486,38 @@ mod tests {
         assert!(should_use_command_extension(false, "Terminal.app"));
         assert!(!should_use_command_extension(false, "iTerm"));
         assert!(!should_use_command_extension(true, "Terminal.app"));
+    }
+
+    #[test]
+    fn test_maybe_append_ai_tool_launch_hint_for_tmux() {
+        let message = maybe_append_ai_tool_launch_hint(
+            "Terminal launch failed (exit code 1): permission denied".to_string(),
+            &["tmux".to_string(), "new-session".to_string()],
+            true,
+        );
+        assert!(message.contains("managed AI tool session"));
+        assert!(message.contains("Rerun it with approval/escalation."));
+    }
+
+    #[test]
+    fn test_maybe_append_ai_tool_launch_hint_for_wsh() {
+        let message = maybe_append_ai_tool_launch_hint(
+            "Failed to spawn terminal process: operation not permitted".to_string(),
+            &["wsh".to_string(), "launch".to_string()],
+            true,
+        );
+        assert!(message.contains("managed AI tool session"));
+        assert!(message.contains("Rerun it with approval/escalation."));
+    }
+
+    #[test]
+    fn test_maybe_append_ai_tool_launch_hint_skips_non_terminal_commands() {
+        let message = maybe_append_ai_tool_launch_hint(
+            "plain failure".to_string(),
+            &["bash".to_string()],
+            true,
+        );
+        assert_eq!(message, "plain failure");
     }
 
     #[test]
