@@ -1,32 +1,40 @@
-# hcom
+# hcom - multi-agent communication
 
 [![PyPI](https://img.shields.io/pypi/v/hcom)](https://pypi.org/project/hcom/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Built_with-Rust-dea584)](https://www.rust-lang.org/)
 [![GitHub stars](https://img.shields.io/github/stars/aannoo/hcom)](https://github.com/aannoo/hcom/stargazers)
 
-Agents running in separate terminals are isolated from each other. Context doesn't transfer, decisions get repeated, file edits collide.
+**Let AI agents message, watch, and spawn each other across terminals.**
 
-hcom connects your existing AI tools. When one agent edits a file, runs a command, or sends a message, other agents find out immediately.
+Agents running in separate terminals are isolated. Context doesn't transfer, decisions get repeated, file edits collide.
+
+Prefix any agent with `hcom` and they're connected. When one agent edits a file, runs a command, or sends a message, other agents can find out immediately.
+
+Works with Claude Code, Gemini CLI, Codex, OpenCode, and any AI tool that can run shell commands.
 
 ![demo](https://raw.githubusercontent.com/aannoo/hcom/refs/heads/assets/screencapture-new-new.gif)
 
 ---
 
-## Quickstart
-
+## Install
+ 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/aannoo/hcom/main/install.sh | sh
 ```
-
+ 
 <details><summary>Or with pip/uv</summary>
-
+ 
 ```bash
 pip install hcom        # or
 uv tool install hcom
 ```
-
+ 
 </details>
+ 
+---
+
+## Quickstart
 
 Run agents with `hcom` in front:
 
@@ -78,21 +86,18 @@ Tell any agent:
 > find which agent worked on terminal_id code, resume them and ask why it sucks
 
 
-<details><summary>What agents can do</summary>
+## What agents can do
 
-| | |
+|Capability|Command|
 |---|---|
 | Message each other (intents, threads, broadcast, @mentions) | `hcom send` |
 | Read each other's transcripts (ranges and detail levels) | `hcom transcript` |
 | View terminal screens, inject text/enter for approvals | `hcom term` |
 | Query event history (file edits, commands, status, lifecycle) | `hcom events` |
 | Subscribe and react to each other's activity | `hcom events sub` |
-| Spawn, fork, resume agents in new terminal panes | `hcom N claude\|gemini\|codex\|opencode`, `hcom r`, `hcom f` |
+| Spawn (multiple), fork, resume agents in new terminal panes | `hcom N claude\|gemini\|codex\|opencode`, `hcom r`, `hcom f` |
 | Kill agents and close their terminal panes/sessions | `hcom kill` |
 | Build context bundles (files, transcript, events) for handoffs | `hcom bundle` |
-
-</details>
-
 
 ---
 
@@ -109,7 +114,6 @@ Included workflow scripts.
 Create your own by prompting:
 
 > "read `hcom run docs` then make a script that does X"
-
 
 ---
 
@@ -141,15 +145,17 @@ Run `hcom claude`. Then inside, prompt:
 ---
 
 ## Terminal
+ 
+Spawning works with any terminal emulator. Killing/closing works with **kitty**, **wezterm**, and **tmux**.
 
-Spawning works with any terminal emulator. Run `hcom config terminal --info` to set up a custom one.
-
-Closing/killing works with kitty, wezterm (auto open/close panes), and tmux (background).
-
+Run for more info / custom setup: `hcom config terminal --info`
+ 
 ```bash
-hcom config terminal kitty    # set
+hcom config terminal default       # auto-detect
+hcom config terminal kitty         # set
+hcom claude --terminal tmux        # override once
 ```
-
+ 
 ---
 
 ## Cross-device
@@ -168,18 +174,15 @@ hcom relay connect <token>
 
 ## What gets installed
 
-Hooks go into `~/` (or `HCOM_DIR`) on launch or `hcom start`. If you aren't using hcom, the hooks do nothing.
+Hooks go into `~/` (or `HCOM_DIR`) on first run. If you aren't using hcom, the hooks do nothing.
 
 ```bash
 hcom hooks remove                  # safely remove only hcom hooks
+hcom status                        # diagnostics
 ```
 
 ```bash
 HCOM_DIR=$PWD/.hcom                # for sandbox or project local
-```
-
-```bash
-hcom status                        # diagnostics
 ```
 
 ---
@@ -190,7 +193,7 @@ hcom status                        # diagnostics
 <summary>CLI</summary>
 
 ```
-hcom (hook-comms) v0.7.3 - multi-agent communication
+hcom (hook-comms) v0.7.5 - multi-agent communication
 
 Usage:
 hcom                                  TUI dashboard
@@ -931,9 +934,9 @@ Managed (open + close on kill):
     tmux: tmux-split
 
 Other (opens window only):
-  Terminal.app
-  iTerm
-  Ghostty
+  terminal.app
+  iterm
+  ghostty
   alacritty
   ttab
   zellij
@@ -1165,6 +1168,9 @@ ln -sf "$(pwd)/bin/hcom" ~/.local/bin/hcom
 
 Issues and PRs welcome. The codebase is Rust — `./build.sh` builds, runs tests, and copies the binary.
 
+---
+
 ## License
 
-MIT
+[MIT](LICENSE)
+
