@@ -740,12 +740,14 @@ fn start_bare(
         }
     }
 
-    // Check if already exists and active
-    if let Ok(Some(existing)) = db.get_instance_full(&name) {
-        if existing.status != "stopped" {
-            // Already active — short message
-            println!("hcom already started for {}", name);
-            return Ok(0);
+    // Check if already exists and active (only for explicit names —
+    // generate_unique_name creates a placeholder row we must skip past)
+    if explicit_name.is_some() {
+        if let Ok(Some(existing)) = db.get_instance_full(&name) {
+            if existing.status != "stopped" {
+                println!("hcom already started for {}", name);
+                return Ok(0);
+            }
         }
     }
 
