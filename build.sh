@@ -2,8 +2,11 @@
 # Build hcom Rust binary, copy to bundled location
 #
 # Modes:
-#   ./build.sh              — build + copy
-#   ./build.sh --post-build — copy only (called by watch.sh)
+#   ./build.sh                   — build + copy + install to PATH
+#   ./build.sh --no-install      — build + copy, skip PATH install
+#   ./build.sh --release         — release build + copy + install to PATH
+#   ./build.sh --release --no-install
+#   ./build.sh --post-build      — copy only (called by watch.sh)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 NATIVE_DIR="$SCRIPT_DIR"
@@ -69,7 +72,22 @@ fi
 # --- Full build mode ---
 
 RELEASE_MODE=false
-[[ "$1" == "--release" ]] && RELEASE_MODE=true
+INSTALL_TO_PATH=true
+
+for arg in "$@"; do
+    case "$arg" in
+        --release)
+            RELEASE_MODE=true
+            ;;
+        --no-install)
+            INSTALL_TO_PATH=false
+            ;;
+        *)
+            echo "[build] ERROR: unknown argument: $arg"
+            exit 1
+            ;;
+    esac
+done
 
 # Ensure cargo is on PATH (zshenv may not be sourced in all environments)
 if ! command -v cargo &>/dev/null && [[ -f "$HOME/.cargo/env" ]]; then
@@ -99,6 +117,11 @@ echo "Running tests..."
 cargo test || { echo "[build] ERROR: cargo test failed"; exit 1; }
 
 copy_to_bundled
+
+if [[ "$INSTALL_TO_PATH" != true ]]; then
+    echo "Skipped PATH install (--no-install)"
+    exit 0
+fi
 
 # Deploy to PATH — on noexec filesystems (Android shared storage), copy directly
 hcom_path=$(command -v hcom 2>/dev/null || true)
